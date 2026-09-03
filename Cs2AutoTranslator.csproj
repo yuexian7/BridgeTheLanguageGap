@@ -1,0 +1,120 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<Configurations>Debug;Release</Configurations>
+	
+		<!--The file where mod information which is required for publishing mod on PDX mods are stored-->
+		<PublishConfigurationPath>Properties\PublishConfiguration.xml</PublishConfigurationPath>
+	</PropertyGroup>
+	
+	<!--Imports must be after PropertyGroup block-->
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.props" />
+	<Import Project="$([System.Environment]::GetEnvironmentVariable('CSII_TOOLPATH', 'EnvironmentVariableTarget.User'))\Mod.targets" />
+
+	<!--
+	  本机没有安装 Visual Studio / .NET Framework 4.8 目标包，官方 Mod.props 只指定了 TargetFramework=net48。
+	  这个包只在编译期提供参考程序集，PrivateAssets=all 保证它不会被打进模组产物。
+	-->
+	<ItemGroup>
+		<PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+		<!--
+		  Paradox Mods 上的代码模组各自捆绑 0Harmony.dll，且游戏内实际加载的是官方 Lib.Harmony 2.2.2.0。
+		  BepInEx 用的是 HarmonyX 2.9.0.0，依赖 Mono.Cecil / MonoMod.*，那些程序集在 CS2 的 Managed 目录里不存在，
+		  带上去会让 ModManager 报 MissedDependenciesError / LoadAssemblyReferenceError。必须用 2.2.2 且保持 copy-local。
+		-->
+		<PackageReference Include="Lib.Harmony" Version="2.2.2" />
+	</ItemGroup>
+
+	<!--
+	  覆盖 Mod.targets 的同名 Target，唯一目的是给子进程注入 DOTNET_ROLL_FORWARD=Major：
+	  ModPostProcessor.exe 目标 net6.0，本机只有 .NET 8 运行时，它的 runtimeconfig.json 里又没写 rollForward，
+	  而官方 Target 的 Exec 没有带 EnvironmentVariables，不注入就报找不到运行时。
+
+	  BeforeTargets="DeployWIP" 是修正执行顺序的关键。官方 Mod.targets 里 RunModPostProcessor 声明在 DeployWIP
+	  之前，所以官方顺序是「先后处理、再部署」；但 csproj 对同名 Target 的重声明位于 <Import> 之后，
+	  只靠 AfterTargets="AfterBuild" 会被排到 DeployWIP 后面，于是部署目录（= 发布时上传的 ContentFolder）
+	  里留下的是后处理之前的程序集。显式声明 BeforeTargets 才能恢复官方顺序。
+	-->
+	<Target Name="RunModPostProcessor" AfterTargets="AfterBuild" BeforeTargets="DeployWIP" Condition="'$(NeedBuild)'">
+		<Error Condition="!Exists('$(ModPostProcessorFullPath)')" Text="Post processor not found, please check the path: $(ModPostProcessorFullPath)" />
+		<Message Text="Run post processor: $(ModPostProcessorArgs)" Importance="high" />
+		<Exec Command="$(ModPostProcessorArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
+	</Target>
+
+	<!--
+	  覆盖 Mod.targets 的 RunModPublisher，理由与 RunModPostProcessor 完全一致：
+	  ModPublisher.exe 也是 net6.0 目标、runtimeconfig.json 也没写 rollForward、官方 Exec 也没带 EnvironmentVariables，
+	  本机只有 .NET 8 运行时的话，它会以 -2147450730（hostfxr 找不到匹配框架）退出。
+	  不需要 BeforeTargets：ModPublisherConfig（负责算 $(ModPublisherArgs)）在 Mod.targets 里声明在本 Target 之前，
+	  重声明只把本 Target 挪到 AfterTargets=Publish 组的末尾，属性先算后用的顺序仍然成立。
+	-->
+	<Target Name="RunModPublisher" AfterTargets="Publish">
+		<Error Condition="!Exists('$(ModPublisherPath)')" Text="Mod publisher not found, please check the path: $(ModPublisherPath)" />
+		<Message Text="Run mod publisher: $(ModPublisherArgs)" Importance="high" />
+		<Exec Command="$(ModPublisherArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
+	</Target>
+
+	<ItemGroup>
+		<Reference Include="Game">
+			<Private>false</Private>
+		</Reference>
+		<!--cohtml.Net 提供 ILocalizationManager.TranslationData，Harmony 补丁的目标方法签名要用到-->
+		<Reference Include="cohtml.Net">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Core">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Logging">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.IO.AssetDatabase">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.UI">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.UI.Binding">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Colossal.Localization">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.InputSystem">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="UnityEngine.CoreModule">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Burst">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Collections">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Entities">
+			<Private>false</Private>
+		</Reference>
+		<Reference Include="Unity.Mathematics">
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Reference Update="System">
+			<Private>false</Private>
+		</Reference>
+		<Reference Update="System.Core">
+			<Private>false</Private>
+		</Reference>
+		<Reference Update="System.Data">
+			<Private>false</Private>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="$(ModPropsFile)" Link="Properties\Mod.props" />
+		<None Include="$(ModTargetsFile)" Link="Properties\Mod.targets" />
+	</ItemGroup>
+
+</Project>

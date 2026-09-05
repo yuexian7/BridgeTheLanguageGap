@@ -1,6 +1,7 @@
 <Publish>
 	<!--Id must be set in order to update existed mod. it is not required for publishing mod for the first time-->
 	<!-- 2026-09-03 首发由 ModPublisher 返回：Mod published with Id=157802。以后任何 NewVersion/Update 都必须带上它 -->
+	<ModId Value="157802" />
 
 	<!--
 	  这份文件是 Paradox Mods 线上页面（modId 157802）的【镜像】，不是「这次想发什么」的草稿。
@@ -190,19 +191,22 @@ BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产�
 	<Thumbnail Value="Properties/Thumbnail.png" />
 	<!--Screenshot, can be set multiple times-->
 	<!--
-	  四条按线上顺序排，编号与线上 screenshot_01..04 一一对应。
-	  线上第 2~4 张原本只存在于 Paradox 服务器（本地只有两张，而且本地那张 Screenshot1.png
-	  根本没上线），所以是从 CDN 取回后转成 PNG 的：ModPublisher 只对 PNG 有成功先例，不赌它收 jpg。
-	  本地那张没上线的旧图留档在交接工作区 state/local-only-Screenshot1.png。
+	  四条按线上顺序排，编号与线上 screenshot_01..04 一一对应，格式也照线上原样：
+	  线上 01/02 本来就是 PNG（CDN 重编码过，alpha 被剥掉 → colorType 2），03/04 本来就是 JPEG。
+	  2026-09-06 实测推翻了「统一转成 PNG 更保险」这个判断：jpg 转 RGBA PNG 后 03/04 分别涨到
+	  2.8 MB / 3.2 MB，PublishNewVersion 直接报「Image size should not exceed 2.1 MB」而失败
+	  （Update 不校验图片大小，所以那次反而过了 —— 别拿 Update 的成功当 NewVersion 的凭据）。
+	  所以现在 Properties\Screenshot3.jpg / Screenshot4.jpg 与线上 CDN 那两份**逐字节一致**，
+	  不要再转格式。本地那张从未上线的旧图留档在交接工作区 state/local-only-Screenshot1.png。
 	-->
 	<!-- 1 线上 screenshot_01：模组设置页整页中文，连左侧栏的模组名与控件标签都翻好了 -->
 	<Screenshot Value="Properties/Screenshot1.png" />
 	<!-- 2 线上 screenshot_02：同一页在乌克兰语下的样子（作者手写标注 after） -->
 	<Screenshot Value="Properties/Screenshot2.png" />
 	<!-- 3 线上 screenshot_03：资产信息面板 + 地图上的路名与区名，目标语言中文（作者标注 before） -->
-	<Screenshot Value="Properties/Screenshot3.png" />
+	<Screenshot Value="Properties/Screenshot3.jpg" />
 	<!-- 4 线上 screenshot_04：同一场景、目标语言乌克兰语（作者标注 after），资产名/资产描述/路名/区名都翻成了乌克兰语 -->
-	<Screenshot Value="Properties/Screenshot4.png" />
+	<Screenshot Value="Properties/Screenshot4.jpg" />
 	<!--Tag, can be set multiple times-->
 	<!-- 线上 tags 就是这一个值（ModPublisher 会校验 Tag 字符串，别凭空猜） -->
 	<Tag Value="Code Mod" />
@@ -225,13 +229,17 @@ BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产�
 	<ChangeLog>
 v0.30
 
+- Key bindings shown as separate letters (e.g. "W A S D") are no longer sent for translation.
+- Strings that are nothing but a placeholder (e.g. "{VALUE}") are no longer sent for translation.
+- When a translation service swallows the placeholder guard marks, that translation is now rejected and the original text is kept, so you no longer see empty boxes in the UI.
+- Settings are stored in a single file (ModsSettings\Cs2AutoTranslator.json); the extra .coc file is no longer created.
+
+中文
+
 - 空格分隔的键位串（例如 W A S D）不再送去翻译。
 - 纯占位符（例如 {VALUE}）不再送去翻译。
 - 翻译接口吞掉占位符保护标记时，该条译文判废并还原原文，界面上不再出现方块。
-- 「模组选项及说明」的范围判别改用注入的已注册模组 id 列表：行为不变，但这条链路现在能在游戏外跑回归测试。
 - 设置只存 ModsSettings 下 Cs2AutoTranslator.json 一份，不再额外生成框架的 .coc 文件。
-- 移除 BepInEx 版旧译文缓存的搬迁代码（对 IMod 版玩家无用）。
-- 新增离线回归测试壳：不启动游戏、不花翻译额度，覆盖分类、跳过规则、占位符保护与设置读取。
 	</ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<!-- 线上两条外链，类型与 URL 都照抄；开源链接同时是兼容性审查里「代码可见」的凭据 -->

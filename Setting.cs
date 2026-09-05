@@ -10,9 +10,13 @@ using Game.UI.Widgets;
 namespace Cs2AutoTranslator
 {
     // 分组顺序（需求 6/7）：总开关 → 翻译范围 → 翻译语言与保存 → API密钥与测试 → 其它与免责。
-    // 刻意不加 [FileLocation]：那个特性只影响框架自带的 .coc 存盘通道，而本模组唯一的存储是
-    // ModsSettings\Cs2AutoTranslator.json（见 SettingsStore）。挂着它每次保存都会额外在用户数据
-    // 根目录留一份本模组用不到的 Cs2AutoTranslator.coc（v0.29 及之前确实有，是 P1 双存储的根源）。
+    // 不加 [FileLocation]：本模组唯一的存储是 ModsSettings\Cs2AutoTranslator.json（见 SettingsStore）。
+    // ⚠ 实测更正（2026-09-06，v0.30 那局）：去掉这个特性**并没有**让 <UserData>\Cs2AutoTranslator.coc 消失 ——
+    // 该文件仍在，且退出时被框架重写（mtime 00:34:13，同目录全部 41 个 .coc 都是这一批），内容停在早期 5 个字段的
+    // 旧快照（MicrosoftKey 还是当年的输入法垃圾值），与 JSON 完全不同步。也就是说它是框架设置库里的一条
+    // 历史记录，退出时原样回写；本模组既不读它也不再往里写。
+    // 未验证的两问（删掉文件跑一局即可判定）：① 手工删了会不会再生；② 全新安装的玩家会不会一开始就没有它。
+    // 若答案是「不会再生 / 新玩家没有」，那 v0.30 线上更新日志那句「不再生成 .coc」只是措辞不严；若会再生就是错的。
     [SettingsUIGroupOrder(kGroupMain, kGroupScope, kGroupTarget, kGroupKeys, kGroupMisc)]
     [SettingsUIShowGroupName(kGroupMain, kGroupScope, kGroupTarget, kGroupKeys, kGroupMisc)]
     public class TranslatorSetting : ModSetting
@@ -217,7 +221,8 @@ namespace Cs2AutoTranslator
             // 唯一存储：自管 JSON（写在官方约定的 ModsSettings\Cs2AutoTranslator.json）。
             // 不用框架的 .coc 通道，是因为玩家现有的设置都在这份 JSON 里，换存储会静默丢配置；
             // 且本模组的设置项带自定义事件回调（开关即时生效、key 需要 CleanKey 归一），自管更可控。
-            // 类上已去掉 [FileLocation]，所以游戏不会再为本模组在用户数据根目录写 Cs2AutoTranslator.coc。
+            // 类上去掉 [FileLocation] 后，本模组不再读写任何 .coc；但框架退出时仍会把它库里那条历史记录
+            // 原样回写成 <UserData>\Cs2AutoTranslator.coc（2026-09-06 实测，内容停在旧快照）—— 见类头注释。
             SettingsStore.Load(s);
 
             // Instance 放到最后再赋值：后台线程一旦看到 Instance!=null，就能保证配置已加载完，不会读到空 key。

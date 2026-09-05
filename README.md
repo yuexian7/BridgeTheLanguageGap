@@ -31,6 +31,8 @@ Cities: Skylines II leaves a lot of UI text untranslated across languages, and m
 
 API keys are stored in plaintext **on your own machine only** (`ModsSettings\Cs2AutoTranslator.json`) and are sent solely to the translation service you select. The mod contacts no author-owned server and sends no telemetry.
 
+Since v0.30 that JSON is the only file this mod reads or writes for settings. The game's own settings store may still leave a `Cs2AutoTranslator.coc` in the user-data root, holding a stale snapshot of pre-v0.30 fields; the mod neither reads nor writes it, so removing it cannot break the mod. Whether the store re-creates that file on exit has not been verified.
+
 ## Building from source
 
 ### Prerequisites
@@ -65,7 +67,7 @@ Cs2AutoTranslator/
 │   ├── PublishConfiguration.xml   # Paradox Mods publish metadata — a MIRROR of the live page, not a draft
 │   ├── PublishProfiles/           # PublishNewMod / PublishNewVersion / UpdatePublishedConfiguration
 │   ├── Thumbnail.png              # 950x500 8-bit RGBA
-│   └── Screenshot1..4.png         # The four images that are actually live
+│   └── Screenshot1..2.png / Screenshot3..4.jpg   # The four images that are actually live
 └── Cs2AutoTranslator.csproj
 ```
 
@@ -74,9 +76,17 @@ Cs2AutoTranslator/
 Publishing metadata is guarded by `preflight-publish.mjs` in the handover workspace — run it before any
 `Update`/`NewVersion`, because those commands overwrite the live page field-by-field from this xml.
 
+Screenshots 3 and 4 stay JPEG on purpose: `NewVersion` rejects any image over 2.1 MB, and converting these
+to PNG inflates them ~10x (278 KB → 2.8 MB). `Update` validates nothing about images, so a successful
+`Update` is not evidence a `NewVersion` will pass.
+
+When re-uploading binaries use **`NewVersion`**, not `Update`: `Update` pushes `<ModVersion>` along with the
+metadata, which burns the version label without uploading anything — the following `NewVersion` then fails
+with `User version already exists for this mod`.
+
 ## Version
 
-Current source: **v0.30** (published on Paradox Mods: v0.29) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
+Current source: **v0.30** — published on Paradox Mods 2026-09-06 (platform `modVersion 2`) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
 
 ## License
 

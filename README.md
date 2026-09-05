@@ -31,7 +31,7 @@ Cities: Skylines II leaves a lot of UI text untranslated across languages, and m
 
 API keys are stored in plaintext **on your own machine only** (`ModsSettings\Cs2AutoTranslator.json`) and are sent solely to the translation service you select. The mod contacts no author-owned server and sends no telemetry.
 
-Since v0.30 that JSON is the only file this mod reads or writes for settings. The game's own settings store may still leave a `Cs2AutoTranslator.coc` in the user-data root, holding a stale snapshot of pre-v0.30 fields; the mod neither reads nor writes it, so removing it cannot break the mod. Whether the store re-creates that file on exit has not been verified.
+Since v0.30 that JSON is the only file this mod reads or writes for settings. Players updating from v0.29 may still have a `Cs2AutoTranslator.coc` in the user-data root, holding a stale snapshot of pre-v0.30 fields; the game's settings store rewrites that file if it already exists but never creates it, so deleting it is safe and permanent — the mod does not read it either way.
 
 ## Building from source
 

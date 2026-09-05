@@ -1,9 +1,5 @@
 using System;
-using System.Collections;
-using System.Collections.Generic;
 using System.Globalization;
-using System.Reflection;
-using Game.Modding;
 
 namespace Cs2AutoTranslator
 {
@@ -12,7 +8,8 @@ namespace Cs2AutoTranslator
     // 设计要点：
     //  - 分类只看本地化 key 的前缀（Group.SUBKEY[Identifier] 形式），纯字符串比较、零联网、极廉价。
     //  - ShouldSkipLocal 在入队前跑，命中即「无需翻译」：不联网、不显示「…」标记，直接放行原文。
-    //    它覆盖三类：① 纯数字/符号；② 快捷键（Ctrl+Enter 这种）；③ 已经是目标语言（同文字系统）。
+    //    它覆盖三类：① 剥掉 {VALUE} 这类占位符后不含任何字母/表意字符（纯数字、纯符号、纯占位符）；
+    //    ② 键位串（Ctrl+Enter、Mouse0，以及 W A S D 这种空格分隔的组合）；③ 书写系统已经是目标语言。
     //  - 玩家自定义/输入的文字（重命名道路·资产、模组参数文本框、任何输入框）天然没有 key、
     //    不进本地化字典，所以 Prefix 的 dict.TryGetValue 永远拿不到它们 → 结构性地永不被翻译（需求 11）。
     internal static class Scope
@@ -63,9 +60,14 @@ namespace Cs2AutoTranslator
             return false;
         }
 
-        // ===== 模组 identifier 判别（best-effort，反射读取 ModSetting.instances）=====
-        private static string[] _modIds = Array.Empty<string>();
-        private static float _modIdsAt = -1f;
+        // ===== 模组 identifier 判别 =====
+        // 已注册模组 id 由宿主注入（Mod.cs 的 RegisteredModIds 负责反射 ModSetting.instances + 5 秒节流）。
+        // 为什么做成委托而不是在这里自己反射：本文件与 TextKit.cs 要能被【零游戏 DLL 依赖】的离线测试壳
+        // （tests\t3）单独编译，而 UnityEngine.Time.realtimeSinceStartup 那句在 try 之外，离线必抛 TypeLoadException。
+        // 未注入（离线壳）→ 空数组 → Options.* 一律保守归 GameCore，与旧的「反射失败」退化行为完全一致。
+        private static Func<string[]> _modIdsProvider;
+
+        internal static void SetModIdProvider(Func<string[]> provider) { _modIdsProvider = provider; }
 
         // identifier 是否属于某个已注册模组（其首段命中 ModSetting.instances 的 key 前缀）。
         private static bool IsModIdentifier(string key)
@@ -88,32 +90,12 @@ namespace Cs2AutoTranslator
             return key.Substring(a + 1, b - a - 1);
         }
 
-        // 每 5 秒最多刷新一次模组 id 列表（模组在加载期陆续注册，缓存即可；SaveNow 会强制刷新）。
-        public static string[] GetModIds()
+        private static string[] GetModIds()
         {
-            float now = UnityEngine.Time.realtimeSinceStartup;
-            if (_modIds.Length > 0 && now - _modIdsAt < 5f) return _modIds;
-            _modIdsAt = now;
-            try
-            {
-                PropertyInfo pi = typeof(ModSetting).GetProperty("instances", BindingFlags.NonPublic | BindingFlags.Static);
-                if (pi?.GetValue(null) is IDictionary dict)
-                {
-                    var list = new List<string>(dict.Count);
-                    foreach (var k in dict.Keys)
-                    {
-                        string s = k as string;
-                        if (!string.IsNullOrEmpty(s) && s.IndexOf("Cs2AutoTranslator", StringComparison.Ordinal) < 0)
-                            list.Add(s);
-                    }
-                    _modIds = list.ToArray();
-                }
-            }
-            catch { /* 反射失败：退化为「无法判别模组」，Options.* 一律归游戏本体（保守，不误翻本体设置）*/ }
-            return _modIds;
+            Func<string[]> provider = _modIdsProvider;
+            if (provider == null) return Array.Empty<string>();
+            return provider() ?? Array.Empty<string>();
         }
-
-        public static void RefreshModIds() { _modIdsAt = -1f; GetModIds(); }
 
         // ===== 本地预筛：是否「无需翻译」（需求 1 + 4）=====
         // 返回 true = 跳过翻译（ResolveAsSkip、不显示「…」、不联网）。极廉价，热路径可逐条调用。
@@ -121,16 +103,11 @@ namespace Cs2AutoTranslator
         {
             if (string.IsNullOrEmpty(text)) return true;
 
-            // 规则①：纯数字/符号/空白（去掉数字、空白、标点、符号后为空）→ 跳过。
-            // 例：15、{符号}{价值}、+、100%、1.5、—— 这些翻译没意义，且常被误翻成占位符。
-            bool hasLetterOrIdeo = false;
-            foreach (char c in text)
-            {
-                if (char.IsLetterOrDigit(c) && !char.IsDigit(c)) { hasLetterOrIdeo = true; break; }
-            }
-            if (!hasLetterOrIdeo) return true; // 全是数字/标点/符号/空白
+            // 规则①：剥掉 {...} 占位符后不含任何字母/表意字符 → 跳过。
+            // 例：15、+、100%、——、{VALUE}、{VALUE}{COUNT} 这些翻不出新信息（v0.21 事故串、以及纯占位符都走这里）。
+            if (!HasTranslatableText(text)) return true;
 
-            // 规则②：快捷键组合（Ctrl+Enter / Shift + A / W A S D / Mouse0 等）→ 跳过。
+            // 规则②：键位串（Ctrl+Enter / Shift + A / Mouse0 / F12 / Q+E / 单字母 / 空格分隔的 W A S D）→ 跳过。
             if (LooksLikeKeyBinding(text)) return true;
 
             // 规则③：文本「书写系统」与目标语言一致 → 已是目标语言，本地跳过、不联网（所有语言通用）。
@@ -141,6 +118,25 @@ namespace Cs2AutoTranslator
             //   - 跨族（拉丁↔西里尔↔中日韩）字形正交，外语文字永不被同族规则误跳，仍照常翻译。
             if (IsAlreadyTargetScript(text, targetLocale, activeLocale)) return true;
 
+            return false;
+        }
+
+        // 剥掉 {...} 占位符后还剩不剩「可翻的字母/表意字符」。占位符识别语义与 TransGuard.Mask 保持一致
+        // （单行、close - i <= 64、不跨行）——那边不掩的，这里也不当作占位符，两处判定错开只会漏翻。
+        // 为什么在本文件重写一份而不是去借 Mask：Scope.cs 与 TextKit.cs 都要能被离线壳各自独立编译。
+        private static bool HasTranslatableText(string text)
+        {
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] == '{')
+                {
+                    int close = text.IndexOf('}', i + 1);
+                    if (close > i && close - i <= 64 && text.IndexOf('\n', i, close - i) < 0)
+                    { i = close; continue; }
+                }
+                char c = text[i];
+                if (char.IsLetterOrDigit(c) && !char.IsDigit(c)) return true;
+            }
             return false;
         }
 
@@ -240,10 +236,22 @@ namespace Cs2AutoTranslator
             for (int n = 1; n <= 12; n++)
                 if (lower.IndexOf("f" + n.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) >= 0) return true;
 
-            // 形如 "A"、"W A S D"、"Q+E" 的极短 ASCII 组合（含分隔符或单字母）。
+            // 形如 "A"、"Q+E"、"W A S D" 的极短 ASCII 组合。
             if (hasPlusOrCombo) return true;
             string trimmed = text.Trim();
             if (trimmed.Length == 1 && char.IsLetter(trimmed[0])) return true;
+
+            // 空格分隔的键位串（"W A S D"、"Q E R T"）：按空白切开后每个 token 恰好 1 个 ASCII 字母/数字，且至少 2 个 token。
+            // 刻意【不】放宽到 2~3 字符的 token —— 那样 "to go"、"U S A" 这类真文字会被误判成键位而永远不翻，
+            // 漏翻比多翻一次严重得多。走到这里 text 已保证是纯 ASCII 且只含字母数字与 + - / , 和空白。
+            string[] parts = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2)
+            {
+                bool everySingleKey = true;
+                foreach (string p in parts)
+                    if (p.Length != 1 || !char.IsLetterOrDigit(p[0])) { everySingleKey = false; break; }
+                if (everySingleKey) return true;
+            }
 
             return false;
         }

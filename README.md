@@ -6,7 +6,9 @@ Machine-translates Cities: Skylines II UI text (game + mods) into your language,
 
 ## Paradox Mods
 
-**[拯救语言不通 Auto Translator (ModId 157802)](https://mods.paradoxplaza.com/mods/157802/any)**
+**[Bridge the Language Gap (ModId 157802)](https://mods.paradoxplaza.com/mods/157802/windows)**
+
+Use the `/windows` URL: `/mods/157802/any` renders "the mod is corrupted or the selected operating system is not supported".
 
 Subscribe in-game via `Mods → Paradox Mods`, or install through Skyve.
 
@@ -19,8 +21,9 @@ Cities: Skylines II leaves a lot of UI text untranslated across languages, and m
 - **On-demand translation**: only translates strings you actually see and have enabled in scope; no bulk pre-translation.
 - **Local disk cache**: each string is translated once, then cached to `ModsData\Cs2AutoTranslator\translation.cache`. Works offline afterwards. API usage stays very low.
 - **Configurable scope**: toggle game-only, mod-only, or both; toggle asset names/descriptions/mod names separately.
-- **Multi-engine support**: Microsoft Azure (default), DeepL, Baidu, Google (keyed + keyless fallback).
-- **12-language mod UI**: the mod's own settings page ships with translations for 12 languages; falls back to machine translation for others.
+- **Multi-engine support**: Microsoft Azure (default), DeepL, Baidu, Google.
+- **44 target languages** ship in `LanguageCatalog.cs`, plus the current game locale. Text that is already in your target language is skipped locally, as are key bindings and pure `{PLACEHOLDER}` strings.
+- **Mod UI in 12 languages**: the mod's own settings page ships with translations for the game's 12 built-in locales; for anything else it machine-translates its own text with the selected engine.
 - **One-click test / save / clear cache / open log folder**: all inside the mod's settings page.
 - **Dedicated log file**: separate from the game's log, easy to attach when reporting issues.
 
@@ -52,23 +55,28 @@ The csproj overrides two official Mod.targets (`RunModPostProcessor` and `RunMod
 
 ```
 Cs2AutoTranslator/
-├── Mod.cs              # IMod entry point, Harmony patches, translation pipeline
-├── L10n.cs             # 12-language built-in translations for the mod's own UI
+├── Mod.cs              # IMod entry point, Harmony patches, translation pipeline, settings store
+├── TextKit.cs          # Pure-BCL string layer: TransGuard (placeholder masking/validation) + Json reader
+├── L10n.cs             # Built-in translations for the mod's own UI (the game's 12 locales)
 ├── Setting.cs          # ModSetting + SettingsUI definitions
-├── Scope.cs            # Translation scope toggles
+├── Scope.cs            # Key classification + local skip rules
 ├── LanguageCatalog.cs  # Supported target language list
 ├── Properties/
-│   ├── PublishConfiguration.xml   # Paradox Mods publish metadata
+│   ├── PublishConfiguration.xml   # Paradox Mods publish metadata — a MIRROR of the live page, not a draft
 │   ├── PublishProfiles/           # PublishNewMod / PublishNewVersion / UpdatePublishedConfiguration
 │   ├── Thumbnail.png              # 950x500 8-bit RGBA
-│   ├── Screenshot1.png
-│   └── Screenshot2.png
+│   └── Screenshot1..4.png         # The four images that are actually live
 └── Cs2AutoTranslator.csproj
 ```
 
+`TextKit.cs` and `Scope.cs` deliberately reference no game type, so an offline test shell
+(`<Compile Include>`s them into its own assembly) can assert their behaviour without launching the game.
+Publishing metadata is guarded by `preflight-publish.mjs` in the handover workspace — run it before any
+`Update`/`NewVersion`, because those commands overwrite the live page field-by-field from this xml.
+
 ## Version
 
-Current: **v0.29** · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
+Current source: **v0.30** (published on Paradox Mods: v0.29) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
 
 ## License
 

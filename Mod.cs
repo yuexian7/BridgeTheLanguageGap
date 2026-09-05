@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
@@ -42,9 +43,12 @@ namespace Cs2AutoTranslator
             Log = LogManager.GetLogger($"{nameof(Cs2AutoTranslator)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
             // Application.persistentDataPath 只能在主线程取；OnLoad 正好在主线程，先算好存起来，
             // 之后后台线程一律走 ModPaths.DataDir，不再触碰任何 Unity API。
-            ModPaths.Init(Application.persistentDataPath, Application.dataPath);
+            ModPaths.Init(Application.persistentDataPath);
+            // Scope 只认委托：反射 ModSetting.instances 与 UnityEngine.Time 都留在 RegisteredModIds（Mod.cs 离线不可加载）。
+            // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
+            Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v0.29：改用游戏原生 IMod 加载器以便发布到 Paradox Mods；日志与缓存迁到 ModsData\\Cs2AutoTranslator\\；Harmony 换成官方 Lib.Harmony 2.2.2) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v0.30：模组选项范围改用注入的已注册模组 id 列表；空格分隔键位串与纯 {VALUE} 占位符不再送翻；残留私有区哨兵的译文判废并还原原文；去掉框架 .coc 双存储；删掉 BepInEx 旧缓存搬迁；新增离线回归测试) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -306,7 +310,8 @@ namespace Cs2AutoTranslator
 
                 bool ok = SettingsStore.Save(setting);
                 Patches.SyncSettings();  // 把总开关/范围/目标语言/引擎镜像到热路径静态字段（需求8/2）。
-                Scope.RefreshModIds();   // 范围分类用到的模组 id 列表刷新一次。
+                RegisteredModIds.Invalidate();   // 范围分类用到的模组 id 列表刷新一次。
+                ModLog.Info($"[范围] 已注册模组 id：{RegisteredModIds.Get().Length} 个（0 个说明注入失效，「模组选项及说明」会静默不翻）。");
                 TranslatorSetting.LastSaveResult = ok
                     ? $"✓ 已存盘：{SettingsStore.FilePath}"
                     : $"⚠ 保存失败：{SettingsStore.FilePath}（详见日志）";
@@ -814,110 +819,6 @@ namespace Cs2AutoTranslator
         }
     }
 
-    // ===== 占位符保护（需求5）=====
-    // 机翻有时会把 {VALUE} 之类占位符翻成中文、或凭空加花括号（实证："2026年9月"→"{年}年{月}月"、
-    // "{SIGN}{VALUE}%"→"{符号}{价值}%"）。策略：① 送引擎前把 {...} 掩成私有区哨兵，尽量让引擎别动它；
-    // ② 回来后还原；③ 完整性校验：原文每个 {...} 在译文里逐字存在 + 译文没凭空多花括号。
-    // 任一不满足即判不安全，调用方还原原文。best-effort：宁可漏翻也不上屏坏译文。
-    // 注：数字与词互转（1,000↔千、双↔2）是正常译文，不再按数字判定安全。
-    internal static class TransGuard
-    {
-        private const char SentinelStart = '\uE000';
-        private const char SentinelEnd = '\uE001';
-
-        // 把每个「单行、无换行、长度合理」的 {...} 替换成哨兵 \uE000{i}\uE001（i=token 序号）。
-        public static string Mask(string src, out string[] tokens)
-        {
-            var list = new List<string>();
-            if (string.IsNullOrEmpty(src)) { tokens = list.ToArray(); return src; }
-            var sb = new StringBuilder(src.Length);
-            for (int i = 0; i < src.Length; i++)
-            {
-                if (src[i] == '{')
-                {
-                    int close = src.IndexOf('}', i + 1);
-                    if (close > i && close - i <= 64 && src.IndexOf('\n', i, close - i) < 0)
-                    {
-                        sb.Append(SentinelStart).Append(list.Count.ToString(CultureInfo.InvariantCulture)).Append(SentinelEnd);
-                        list.Add(src.Substring(i, close - i + 1));
-                        i = close;
-                        continue;
-                    }
-                }
-                sb.Append(src[i]);
-            }
-            tokens = list.ToArray();
-            return sb.ToString();
-        }
-
-        // 把哨兵还原成原 token（引擎一般原样透传私有区字符；还原不了的保持原样，交给 IsSafe 兜底判废）。
-        public static string Unmask(string masked, string[] tokens)
-        {
-            if (string.IsNullOrEmpty(masked) || tokens == null || tokens.Length == 0) return masked;
-            var sb = new StringBuilder(masked.Length);
-            for (int i = 0; i < masked.Length; i++)
-            {
-                if (masked[i] == SentinelStart)
-                {
-                    int end = masked.IndexOf(SentinelEnd, i + 1);
-                    if (end > i && end - i <= 12 &&
-                        int.TryParse(masked.Substring(i + 1, end - i - 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out int idx) &&
-                        idx >= 0 && idx < tokens.Length)
-                    {
-                        sb.Append(tokens[idx]);
-                        i = end;
-                        continue;
-                    }
-                }
-                sb.Append(masked[i]);
-            }
-            return sb.ToString();
-        }
-
-        public static bool IsSafe(string src, string trans)
-        {
-            if (string.IsNullOrEmpty(trans)) return false;
-            if (string.IsNullOrEmpty(src)) return true;
-
-            // 需求5：只校验【占位符完整性】，不再校验数字（旧①数字多重集已删）。
-            //   原因：机翻常把数字与词互相转换且是正确的（每晚→1晩、双车道→2車線、每 1,000→每千），
-            //   数字多重集相等判定会把这些正常译文误杀还原原文（日志实证 43 条 [校正]）。
-            //   真正危险的占位符损坏由 ②③ 兜住，与数字无关。
-
-            // ① 原文里每个 {...} token 必须在译文里逐字存在（引擎不得把 {SIGN} 翻成 {符号} 或整个吞掉）。
-            foreach (string tok in BraceTokens(src))
-                if (trans.IndexOf(tok, StringComparison.Ordinal) < 0) return false;
-
-            // ② 译文的花括号数量不得超过原文（引擎不得凭空造 {...}，如把「2026年9月」翻成「{年}年{月}月」）。
-            if (CountChar(trans, '{') > CountChar(src, '{')) return false;
-            if (CountChar(trans, '}') > CountChar(src, '}')) return false;
-
-            return true;
-        }
-
-        private static List<string> BraceTokens(string s)
-        {
-            var toks = new List<string>();
-            for (int i = 0; i < s.Length; i++)
-            {
-                if (s[i] == '{')
-                {
-                    int close = s.IndexOf('}', i + 1);
-                    if (close > i && close - i <= 64 && s.IndexOf('\n', i, close - i) < 0)
-                    { toks.Add(s.Substring(i, close - i + 1)); i = close; }
-                }
-            }
-            return toks;
-        }
-
-        private static int CountChar(string s, char c)
-        {
-            int n = 0;
-            foreach (char ch in s) if (ch == c) n++;
-            return n;
-        }
-    }
-
     // ===== 本地缓存：同一段文字只翻译一次并永久保存，重启不再消耗额度（回应用户对额度的担忧）。=====
     internal static class TranslationCache
     {
@@ -942,7 +843,6 @@ namespace Cs2AutoTranslator
             try
             {
                 _path = Path.Combine(ModPaths.DataDir, "translation.cache");
-                MigrateLegacyCache();
                 Dict.Clear();
                 while (_pending.TryDequeue(out _)) { }
                 _appendedLines = 0;
@@ -956,25 +856,6 @@ namespace Cs2AutoTranslator
                 ModLog.Info($"[缓存] 载入 {Dict.Count} 条历史译文：{_path}" + (bad > 0 ? $"（跳过 {bad} 行无法解析）" : ""));
             }
             catch (Exception ex) { ModLog.Error("[缓存] 载入失败: " + ex.Message); }
-        }
-
-        // 一次性搬迁：BepInEx 版本的缓存原本在 <游戏>\BepInEx\plugins\Cs2AutoTranslator\translation.cache，
-        // 改存 ModsData 之后旧缓存就读不到了，等于把之前烧掉的翻译额度全丢。
-        // 只在「新位置还没有缓存 且 旧文件确实存在」时拷一次；发布版玩家没有 BepInEx 目录，这里会直接跳过。
-        private static void MigrateLegacyCache()
-        {
-            try
-            {
-                if (File.Exists(_path)) return;
-                string legacyDir = ModPaths.LegacyBepInExDir;
-                if (string.IsNullOrEmpty(legacyDir)) return;
-                string legacy = Path.Combine(legacyDir, "translation.cache");
-                if (!File.Exists(legacy)) return;
-                Directory.CreateDirectory(Path.GetDirectoryName(_path));
-                File.Copy(legacy, _path, false);
-                ModLog.Info($"[缓存] 已从 BepInEx 旧位置搬迁历史译文：{legacy} → {_path}");
-            }
-            catch (Exception ex) { ModLog.Warn("[缓存] 搬迁旧缓存失败（不影响使用，缺的部分会重新翻译）: " + ex.Message); }
         }
 
         public static string Get(string engine, string src, string dst)
@@ -1171,26 +1052,26 @@ namespace Cs2AutoTranslator
             {
                 if (!File.Exists(FilePath)) { ModLog.Info("[配置] 未找到配置文件，使用默认值：" + FilePath); return; }
                 string json = File.ReadAllText(FilePath, Encoding.UTF8);
-                if (Enum.TryParse<TranslatorSetting.Engine>(GetString(json, "TranslationEngine"), out var eng)) s.TranslationEngine = eng;
+                if (Enum.TryParse<TranslatorSetting.Engine>(Json.ReadString(json, "TranslationEngine"), out var eng)) s.TranslationEngine = eng;
                 // 需求2：旧默认引擎「谷歌免密钥网页接口」已失效（中国大陆挂 VPN 仍 429）→ 自动改回微软，并提示用户确认保存。
                 if (s.TranslationEngine == TranslatorSetting.Engine.Google)
                 {
                     s.TranslationEngine = TranslatorSetting.Engine.Microsoft;
                     ModLog.Info("[配置] 旧默认引擎「谷歌免密钥网页接口」已失效，已自动改为「微软 Azure」。请在选项里确认引擎、填好 key 后点「保存设置并翻译」。");
                 }
-                string tl = GetString(json, "TargetLocale"); if (!string.IsNullOrEmpty(tl)) s.TargetLocale = tl;
-                s.Enabled = GetBool(json, "Enabled", s.Enabled);
-                s.ScopeModOptions = GetBool(json, "ScopeModOptions", s.ScopeModOptions);
-                s.ScopeAssetNames = GetBool(json, "ScopeAssetNames", s.ScopeAssetNames);
-                s.ScopeAssetDescriptions = GetBool(json, "ScopeAssetDescriptions", s.ScopeAssetDescriptions);
-                s.ScopeGameCore = GetBool(json, "ScopeGameCore", s.ScopeGameCore);
-                s.ScopeModName = GetBool(json, "ScopeModName", s.ScopeModName);
-                s.ScopeWorldLabels = GetBool(json, "ScopeWorldLabels", s.ScopeWorldLabels);
-                s.MicrosoftKey = Mod.CleanKey(GetString(json, "MicrosoftKey")) ?? string.Empty;
-                s.MicrosoftRegion = Mod.CleanKey(GetString(json, "MicrosoftRegion")) ?? string.Empty;
-                s.DeepLKey = Mod.CleanKey(GetString(json, "DeepLKey")) ?? string.Empty;
-                s.BaiduAppId = Mod.CleanKey(GetString(json, "BaiduAppId")) ?? string.Empty;
-                s.BaiduKey = Mod.CleanKey(GetString(json, "BaiduKey")) ?? string.Empty;
+                string tl = Json.ReadString(json, "TargetLocale"); if (!string.IsNullOrEmpty(tl)) s.TargetLocale = tl;
+                s.Enabled = Json.ReadBool(json, "Enabled", s.Enabled);
+                s.ScopeModOptions = Json.ReadBool(json, "ScopeModOptions", s.ScopeModOptions);
+                s.ScopeAssetNames = Json.ReadBool(json, "ScopeAssetNames", s.ScopeAssetNames);
+                s.ScopeAssetDescriptions = Json.ReadBool(json, "ScopeAssetDescriptions", s.ScopeAssetDescriptions);
+                s.ScopeGameCore = Json.ReadBool(json, "ScopeGameCore", s.ScopeGameCore);
+                s.ScopeModName = Json.ReadBool(json, "ScopeModName", s.ScopeModName);
+                s.ScopeWorldLabels = Json.ReadBool(json, "ScopeWorldLabels", s.ScopeWorldLabels);
+                s.MicrosoftKey = Mod.CleanKey(Json.ReadString(json, "MicrosoftKey")) ?? string.Empty;
+                s.MicrosoftRegion = Mod.CleanKey(Json.ReadString(json, "MicrosoftRegion")) ?? string.Empty;
+                s.DeepLKey = Mod.CleanKey(Json.ReadString(json, "DeepLKey")) ?? string.Empty;
+                s.BaiduAppId = Mod.CleanKey(Json.ReadString(json, "BaiduAppId")) ?? string.Empty;
+                s.BaiduKey = Mod.CleanKey(Json.ReadString(json, "BaiduKey")) ?? string.Empty;
                 ModLog.Info($"[配置] 已从自管 JSON 载入：启用={s.Enabled} 引擎={s.TranslationEngine} 目标语言={s.TargetLocale} 微软key长度={s.MicrosoftKey.Length}。路径={FilePath}");
             }
             catch (Exception ex) { ModLog.Error("[配置] 载入失败（用默认值）: " + ex.Message); }
@@ -1224,33 +1105,6 @@ namespace Cs2AutoTranslator
                 return ok;
             }
             catch (Exception ex) { ModLog.Error("[配置] 保存失败: " + ex.Message); return false; }
-        }
-
-        // 需求修（reload bug）：Save 写的是 "key": "value"（冒号后带空格），旧版按 "key":" 无空格匹配 → 永远取不到，
-        // 重启后 key/目标语言/引擎全丢（且下次保存把空值写回覆盖）。改为像 GetBool 那样跳过冒号后的空白。
-        private static string GetString(string json, string key)
-        {
-            int i = json.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
-            if (i < 0) return null;
-            int colon = json.IndexOf(':', i);
-            if (colon < 0) return null;
-            int j = colon + 1;
-            while (j < json.Length && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
-            if (j < json.Length && json[j] == '"') return Json.Unquote(json, j + 1);
-            return null;
-        }
-
-        private static bool GetBool(string json, string key, bool def)
-        {
-            int i = json.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
-            if (i < 0) return def;
-            int colon = json.IndexOf(':', i);
-            if (colon < 0) return def;
-            int j = colon + 1;
-            while (j < json.Length && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
-            if (j + 4 <= json.Length && json.Substring(j, 4) == "true") return true;
-            if (j + 5 <= json.Length && json.Substring(j, 5) == "false") return false;
-            return def;
         }
     }
 
@@ -1550,79 +1404,6 @@ namespace Cs2AutoTranslator
         }
     }
 
-    internal static class Json
-    {
-        public static string Escape(string s)
-        {
-            if (s == null) return "";
-            var sb = new StringBuilder();
-            foreach (char c in s)
-            {
-                switch (c)
-                {
-                    case '"': sb.Append("\\\""); break;
-                    case '\\': sb.Append("\\\\"); break;
-                    case '\n': sb.Append("\\n"); break;
-                    case '\r': sb.Append("\\r"); break;
-                    case '\t': sb.Append("\\t"); break;
-                    case '\b': sb.Append("\\b"); break;
-                    case '\f': sb.Append("\\f"); break;
-                    default:
-                        if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
-                        else sb.Append(c);
-                        break;
-                }
-            }
-            return sb.ToString();
-        }
-
-        public static string ExtractValue(string json, string marker)
-        {
-            if (string.IsNullOrEmpty(json)) return null;
-            int i = json.IndexOf(marker, StringComparison.Ordinal);
-            if (i < 0) return null;
-            return Unquote(json, i + marker.Length);
-        }
-
-        public static string ParseFirstJsonString(string json)
-        {
-            if (string.IsNullOrEmpty(json)) return null;
-            int start = json.IndexOf('"');
-            if (start < 0) return null;
-            return Unquote(json, start + 1);
-        }
-
-        internal static string Unquote(string json, int p)
-        {
-            var sb = new StringBuilder();
-            for (; p < json.Length; p++)
-            {
-                char c = json[p];
-                if (c == '"') break;
-                if (c == '\\' && p + 1 < json.Length)
-                {
-                    char e = json[++p];
-                    switch (e)
-                    {
-                        case 'n': sb.Append('\n'); break;
-                        case 't': sb.Append('\t'); break;
-                        case 'r': sb.Append('\r'); break;
-                        case 'b': sb.Append('\b'); break;
-                        case 'f': sb.Append('\f'); break;
-                        case 'u':
-                            if (p + 4 < json.Length && int.TryParse(json.Substring(p + 1, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int code))
-                            { sb.Append((char)code); p += 4; }
-                            break;
-                        default: sb.Append(e); break;
-                    }
-                }
-                else sb.Append(c);
-            }
-            string s = sb.ToString();
-            return string.IsNullOrEmpty(s) ? null : s;
-        }
-    }
-
     // ===== 本模组的运行时数据目录 =====
     // BepInEx 时代用的是 Paths.PluginPath（= BepInEx\plugins\）。发布到 Paradox Mods 之后那个目录根本不存在，
     // 而且 Mod.targets 的 DeployWIP 每次构建都会 RemoveDir 整个 Mods\<模组名>\，绝不能往部署目录里写数据。
@@ -1632,34 +1413,58 @@ namespace Cs2AutoTranslator
     {
         private static string _dataDir;
         private static string _settingsFile;
-        private static string _legacyDir;
 
         // 只能在主线程调用，且必须在后台线程启动前调完（Unity API 的限制）。OnLoad 里已调。
-        // persistentDataPath = Application.persistentDataPath，dataPath = Application.dataPath。
-        public static void Init(string persistentDataPath, string dataPath)
+        // persistentDataPath = Application.persistentDataPath，是整个模组唯一一处读 Unity 路径的地方。
+        public static void Init(string persistentDataPath)
         {
             // Unity 返回的 persistentDataPath 用正斜杠，Windows 上 Path.Combine 又掺反斜杠，
             // 拼出来是「C:/.../Cities Skylines II\ModsData\...」这种混合分隔符，会原样显示在
             // 设置页的「日志路径」栏和日志里。GetFullPath 只按词法归一化分隔符，不解析 junction、不碰磁盘。
             _dataDir = Path.GetFullPath(Path.Combine(persistentDataPath, "ModsData", "Cs2AutoTranslator"));
             _settingsFile = Path.GetFullPath(Path.Combine(persistentDataPath, "ModsSettings", "Cs2AutoTranslator.json"));
-            try
-            {
-                // dataPath 形如 <游戏目录>\Cities2_Data，上一层就是游戏根目录，BepInEx 装在那里。
-                string gameDir = Directory.GetParent(dataPath)?.FullName;
-                if (!string.IsNullOrEmpty(gameDir))
-                    _legacyDir = Path.GetFullPath(Path.Combine(gameDir, "BepInEx", "plugins", "Cs2AutoTranslator"));
-            }
-            catch { }
         }
 
         public static string DataDir => _dataDir;
 
         // 自管设置存档路径。放这里算是因为它同样依赖只能在主线程读的 persistentDataPath。
         public static string SettingsFile => _settingsFile;
+    }
 
-        // BepInEx 时代的旧目录，仅用于一次性搬迁缓存（见 TranslationCache.Load），保住已经烧掉的翻译额度。
-        public static string LegacyBepInExDir => _legacyDir;
+    // ===== 已注册模组 id 列表（供 Scope 判别「这条 Options.* 属于模组还是本体」）=====
+    // 从 Scope.cs 搬过来：反射 typeof(ModSetting) 与 UnityEngine.Time 都留在这个【离线不可加载】的文件里，
+    // Scope.cs 只收一个 Func<string[]>，这样 Scope.cs + TextKit.cs 才能被零游戏 DLL 依赖的 tests\t3 壳编译。
+    // 模组在加载期陆续注册，所以列表缓存 5 秒；保存设置时 Invalidate() 强制刷一次。
+    internal static class RegisteredModIds
+    {
+        private static string[] _ids = Array.Empty<string>();
+        private static float _at = -1f;
+
+        public static void Invalidate() { _at = -1f; Get(); }
+
+        public static string[] Get()
+        {
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (_ids.Length > 0 && now - _at < 5f) return _ids;
+            _at = now;
+            try
+            {
+                PropertyInfo pi = typeof(ModSetting).GetProperty("instances", BindingFlags.NonPublic | BindingFlags.Static);
+                if (pi?.GetValue(null) is IDictionary dict)
+                {
+                    var list = new List<string>(dict.Count);
+                    foreach (var k in dict.Keys)
+                    {
+                        string s = k as string;
+                        if (!string.IsNullOrEmpty(s) && s.IndexOf("Cs2AutoTranslator", StringComparison.Ordinal) < 0)
+                            list.Add(s);
+                    }
+                    _ids = list.ToArray();
+                }
+            }
+            catch { /* 反射失败：退化为「无法判别模组」，Options.* 一律归游戏本体（保守，不误翻本体设置）*/ }
+            return _ids;
+        }
     }
 
     // ===== 本模组专属日志（需求8）=====

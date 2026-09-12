@@ -20,8 +20,9 @@ Cities: Skylines II leaves a lot of UI text untranslated across languages, and m
 
 - **On-demand translation**: only translates strings you actually see and have enabled in scope; no bulk pre-translation.
 - **Local disk cache**: each string is translated once, then cached to `ModsData\Cs2AutoTranslator\translation.cache`. Works offline afterwards. API usage stays very low.
-- **Configurable scope**: toggle game-only, mod-only, or both; toggle asset names/descriptions/mod names separately.
-- **Multi-engine support**: Microsoft Azure (default), DeepL, Baidu, Google.
+- **Configurable scope**: six independent toggles on the settings page — mod names, mod settings & in-game panels, asset names, asset descriptions, game core, and world-rendered text (road/district labels; since v1.0 it translates and refreshes automatically when a save loads).
+- **Multi-engine support**: 12 engines in `SettingsUI.Engine` — 3 that need nothing (Google, DuckDuckGo, MyMemory), 4 that need a registered key with a free tier (Yandex, Microsoft, DeepL, Baidu), and 5 AI providers (Gemini, Groq, OpenRouter, SiliconFlow, Cloudflare) — plus a **custom** endpoint (openai / anthropic / gemini wire formats) for anything else. Token usage is counted locally and shown in the settings.
+- **Hotkeys**: two actions, *toggle translation* and *retranslate what's on screen*. Both ship **unbound** — you assign the key yourself. Bindings are stored in this mod's own JSON rather than the framework's `KeybindingSettings`, because the mod re-registers its actions on every launch and that reset would wipe them.
 - **44 target languages** ship in `LanguageCatalog.cs`, plus the current game locale. Text that is already in your target language is skipped locally, as are key bindings and pure `{PLACEHOLDER}` strings.
 - **Mod UI in 12 languages**: the mod's own settings page ships with translations for the game's 12 built-in locales; for anything else it machine-translates its own text with the selected engine.
 - **One-click test / save / clear cache / open log folder**: all inside the mod's settings page.
@@ -53,11 +54,26 @@ Output deploys to `AppData\LocalLow\Colossal Order\Cities Skylines II\Mods\Cs2Au
 
 The csproj overrides two official Mod.targets (`RunModPostProcessor` and `RunModPublisher`) to inject `DOTNET_ROLL_FORWARD=Major`. Both tools target net6.0 but only .NET 8 runtime is installed, and their `runtimeconfig.json` files don't declare `rollForward`. Without the override, both fail with "You must install or update .NET to run this application" (exit code -2147450730).
 
+**The deployed `0Harmony.dll` is 2.3.3 while the project still compiles against 2.2.2.** .NET binds by assembly
+*simple name* and ignores the version, so whichever copy the loader resolves first fixes the API surface for
+every mod in the session — and `Write Everywhere` calls `HarmonyMethod.op_Implicit(MethodInfo)`, which only
+exists from 2.3.0 on. Code compiled against 2.2.2 runs fine on 2.3.3, not the other way round, so shipping
+2.3.3 is the one-way-compatible choice. `Cs2AutoTranslator.csproj` `PackageDownload`s 2.3.3 (kept out of the
+reference graph) and copies it over `$(OutDir)` **inside** `RunModPostProcessor`, after the post processor's
+`Exec`: the official `ILHasher` cannot read that file's merged metadata (`BadImageFormatException: Read out of
+bounds`) and hangs, so it must never be the version the tool inspects. Verify with the build log line
+`SwapHarmonyRuntime:`, the in-game log line that prints the effective Harmony version, and gate row **T2b**
+in `scripts/verify.mjs`, which compares the deployed DLL's sha256 against the NuGet cache copy.
+
+Note this changes the shared Harmony for every player who installs this mod, and that the swapped DLL is the
+one file in the package the official post processor did not validate.
+
 ## Project layout
 
 ```
 Cs2AutoTranslator/
 ├── Mod.cs              # IMod entry point, Harmony patches, translation pipeline, settings store
+├── EngineKit.cs        # Every translation engine: free endpoints, paid APIs, custom AI wire formats, token counting
 ├── TextKit.cs          # Pure-BCL string layer: TransGuard (placeholder masking/validation) + Json reader
 ├── L10n.cs             # Built-in translations for the mod's own UI (the game's 12 locales)
 ├── Setting.cs          # ModSetting + SettingsUI definitions
@@ -66,8 +82,8 @@ Cs2AutoTranslator/
 ├── Properties/
 │   ├── PublishConfiguration.xml   # Paradox Mods publish metadata — a MIRROR of the live page, not a draft
 │   ├── PublishProfiles/           # PublishNewMod / PublishNewVersion / UpdatePublishedConfiguration
-│   ├── Thumbnail.png              # 950x500 8-bit RGBA
-│   └── Screenshot1..2.png / Screenshot3..4.jpg   # The four images that are actually live
+│   ├── Thumbnail.jpg              # 1254x1254, the store cover
+│   └── Screenshot1..5.png         # The five gallery images, in the order they appear on the page
 └── Cs2AutoTranslator.csproj
 ```
 
@@ -76,9 +92,12 @@ Cs2AutoTranslator/
 Publishing metadata is guarded by `preflight-publish.mjs` in the handover workspace — run it before any
 `Update`/`NewVersion`, because those commands overwrite the live page field-by-field from this xml.
 
-Screenshots 3 and 4 stay JPEG on purpose: `NewVersion` rejects any image over 2.1 MB, and converting these
-to PNG inflates them ~10x (278 KB → 2.8 MB). `Update` validates nothing about images, so a successful
-`Update` is not evidence a `NewVersion` will pass.
+The server caps **each** store image at 2.1 MB (`NewVersion` fails with `Image size should not exceed 2.1 MB`).
+`Update` validates nothing about images, so a successful `Update` is not evidence a `NewVersion` will pass.
+The five gallery PNGs are the author's originals run through `imgtool optipng`: identical pixels and
+dimensions, only the encoding changes (per-row adaptive filter + `SmallestSize` deflate) — the largest one
+goes 2,141,333 → 2,089,365 B. The cover is `imgtool jpg q95`, because a photographic poster cannot fit
+2.1 MB losslessly (2,238,704 B at best) and JPEG is what the platform itself stores for covers.
 
 When re-uploading binaries use **`NewVersion`**, not `Update`: `Update` pushes `<ModVersion>` along with the
 metadata, which burns the version label without uploading anything — the following `NewVersion` then fails
@@ -86,7 +105,7 @@ with `User version already exists for this mod`.
 
 ## Version
 
-Current source: **v0.30** — published on Paradox Mods 2026-09-06 (platform `modVersion 2`) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
+Current source: **v1.0.3** (the 1.0 stable line; v0.30 was the last 0.x build) · Published on Paradox Mods 2026-09-12 · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
 
 ## License
 

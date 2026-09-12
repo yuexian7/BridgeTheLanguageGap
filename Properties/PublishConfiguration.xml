@@ -26,150 +26,106 @@
 	-->
 	<ShortDescription Value="把你看到的统统翻译成你的母语。 Translate everything you see into your native language." />
 	<!--Long description of the mod. Single line or multi line. Supports minimal markdown subset-->
-	<!-- 正文逐字来自线上 longDescription（8291 字符），快照存在交接工作区 state/paradox-live-157802.json。
+	<!-- 正文逐字来自作者 2026-09-12 给的桌面文档「长描述.md」（英文在前、中文在后），不是线上那份的拷贝：
+	     这一推会把线上 longDescription 整段换掉，所以 preflight 要把 LongDescription 放进 allow 白名单。
 	     刻意不缩进：这些行是 markdown 原文，加一层 Tab 会改变列表与标题的解析。 -->
 	<LongDescription>
-# **Bridge the Language Gap (BLG)**（中文在下面）
+# **Bridge the Language Gap**
+
+### Version 1.0 Stable Release Is Here!
+
+A fresh new look! The stable release includes a number of improvements, adds several major translation engines, dramatically boosts translation speed, and comes with a redesigned options interface.
 
 ## Description
 
-It's already 2026, and our game still doesn't support AI translation. There are so many fun mods and assets, yet the lack of localization makes them frustrating for many players to use. As everyone knows, much of the text in Cities: Skylines cannot even be selected or copied. Non-native speakers either have to rely on their limited vocabulary or manually translate everything themselves.
+From the first game to the second, localization for mods and assets has always depended heavily on authors and community contributors. Many interesting mods and assets remain untranslated, making them frustrating to use for non-English players. Yet in-game, we cannot simply select and copy text for translation. That leaves us with screenshots, photos, OCR, or guesswork.
 
-So I created this mod (hereinafter referred to as **BLG**) using Qwen3.8-Max. Previous translation mods mostly focused on the game's built-in text and asset names, while BLG can translate **everything you can see**. Whenever text appears on your screen, BLG automatically sends it to the translation engine you choose and replaces it with your target language. All you need to do is wait a few seconds.
+So I created this mod with Qwen3.8-Max (hereafter referred to as **BLG**). Most translation mods to date have focused mainly on base-game text and official asset names, but **BLG can translate every piece of text you can see**. Whether it is a mod’s settings interface or an asset information panel, the mod will automatically call a translation engine and convert it into your target language. All you need to do is wait a few seconds.
 
-BLG's translation scope includes game text, mod settings and UI, asset names and descriptions, in-game overlay text (such as road names and district names), and more. You can enable any combination of these categories.
+## How to Use
 
-Up to **50 languages** are supported. While a paragraph is being translated, "···" will appear at the end of the text to indicate that it is currently translating or waiting in the queue.
+**Subscribe to BLG → Open the BLG page in the game’s Options menu → Choose your target language and save → Select the translation scope → Select a translation engine → Turn on the master translation switch**
 
-## Engines
+BLG currently supports translation into more than 50 languages.
 
-*   **DeepL** (requires API key, free tier available)
-*   **Microsoft AZURE** (requires API key and region, free tier available)
-*   **Baidu** (requires AppID + API key, free tier available)
-*   **Google** (Google's free keyless endpoint no longer seems to work. I'll try switching to the official API that requires a key in a future update.)
+Its translation scope includes base-game text, mod option pages and in-game panels, asset names and descriptions, and world-rendered text such as road names and district names. You are free to enable one or more of these categories.
 
-More AI translation engines will be added in the future.
+For most users, Google Translate is usually sufficient. If you need stronger contextual understanding and more semantic accuracy, you can choose AI translation instead. BLG currently supports integration with 12 major free translation engines, as well as API access to mainstream paid AI models such as GPT and Claude. Of course, custom API endpoints are also supported.
 
-If you don't want to register for an API key, I also found a rather strange workaround: choose **Microsoft AZURE** and enter **"中国"** as the API key. It works for me, although I'm not sure whether that's related to my location in China. Feel free to give it a try.
+After making your selections, be sure to test engine connectivity before enabling translation. During translation, an ellipsis (“···”) will appear at the end of a paragraph to indicate that the text is being translated or is waiting to be translated.
 
 ## Compatibility
 
-I've already tested BLG together with **I18N EVERYWHERE** and the localization mods that depend on it. Since the interaction order between translation mods can be complicated, here's the simple conclusion:
+I have tested BLG for compatibility with **I18N EVERYWHERE** and other localization mods that depend on it. If their target language matches BLG’s, BLG will not override the other localization mod. If the target languages differ, BLG will take precedence because it has the highest priority, and it will override them.
 
-**Because BLG automatically translates any visible text that isn't already in your target language, it always has the highest priority. Even if another mod overwrites the text later, BLG will translate it again the next time that text appears—unless you never open that interface again.**
+For example, if you subscribe to a Chinese localization mod, that mod will first replace the text with Chinese when you launch the game. Once BLG is enabled, it will detect that the text is already in Chinese and skip translation, so it will not overwrite it.
 
-Some players may worry about conflicts, but in practice the impact is minimal. BLG automatically skips any text that is already in your target language.
+However, if your target language is set to Chinese and you have a Japanese localization mod subscribed, BLG will translate the Japanese text produced by that mod into Chinese again. How can you avoid this? Simply disable the conflicting parts of the translation scope.
 
-For example, if your game language is English, your target language is Chinese, and you've installed a Chinese localization mod, the localization mod will replace the original English text first. Since BLG sees that the text is already Chinese, it simply skips it instead of translating it again.
+For example, you could keep in-game road names and district names in Japanese, while letting BLG handle only out-of-game text such as asset names and mod interfaces.
 
-The only real conflict occurs if, for example, you want Japanese while you're using a Chinese localization mod. In that case, BLG will overwrite the Chinese translation with Japanese. But I doubt many people would actually use such a setup.
+I have also tested BLG with more than a dozen mainstream mods and have not encountered any issues so far. In theory, as long as a mod does not modify text in real time, there should be no conflict. If you do run into a serious issue, you can send your log to the discussion board or report it through Skyve.
 
-So you can absolutely use both together—for example, let your localization mod translate the base game and road names while BLG handles everything else. I still recommend disabling overlapping translation categories whenever possible.
+## Additional Notes
 
-Other types of mods haven't been fully tested yet, but in theory anything unrelated to text modification should work without conflicts. If you're using mods such as **Write Everywhere** or anything else that may potentially conflict, please leave feedback in the comments.
+* Text inside images, and text embedded in textures, cannot be translated, because those are pixels rather than strings.
+* Since the game’s built-in glyph set is incomplete, many less common languages would otherwise appear as squares after translation, so only the 50+ languages that display properly are currently retained.
+* For performance and technical reasons, I did not scan and translate every piece of text when entering the game. Instead, BLG uses lazy translation (real-time translation with real-time results). In testing, the impact on frame rate and simulation speed is almost negligible.
+* Do not worry about having to retranslate everything each time you restart the game. BLG caches translation results locally after the first translation. Unless you clear the cache or the source text changes, it will use the cached result afterward.
+* Your API key is stored locally only, and it will be sent only to the translation service you choose.
+* All translated text is generated by third-party translation APIs and is **not guaranteed to be perfectly accurate**. All rights to the original text remain with their respective authors.
 
-## Limitations
+## Donations
 
-*   In-game overlay text is still an experimental feature. For performance reasons, translations are only applied when you hover your mouse over the text. For example, road names will only appear in your target language while being hovered.
-*   Text embedded inside images or textures cannot be translated (those are pixels, not strings).
-*   Because the game's built-in fonts don't support every language, many less common languages would only display as squares. Therefore, only around 50 fully supported languages are currently available.
-*   Occasionally, a paragraph may fail to translate. Try clearing the cache first. If the issue persists, please send me your log files for analysis.
+This is my first mod.
 
-## Performance Impact
+If you find it helpful, would you buy me a cup of coffee? ☕
 
-For performance and technical reasons, BLG doesn't scan and translate every piece of text when the game starts. Instead, it uses a lazy translation approach—text is translated only when it becomes visible. According to testing, the impact on frame rate and simulation speed is almost negligible.
 
-You also don't need to worry about retranslating everything every time you restart the game. After the first successful translation, BLG stores the result locally. Unless you clear the translation cache or the original text changes, cached translations will be reused automatically.
-
-## Privacy
-
-Your API keys are stored in plaintext **on your own machine only** (inside the ModsSettings folder under your user data directory) and are sent only to the translation service you choose. This mod does **not** connect to any developer-owned servers and collects **no telemetry or usage statistics**.
-
-## Disclaimer
-
-This mod is currently in **BETA**.
-
-Translations are generated by third-party machine translation services and **are not guaranteed to be accurate**. Incorrect translations, missing translations, or improper terminology may occur. All original text remains the property of its respective authors.
-
-All supported translation services provide free usage quotas (they are **not unlimited**). Since BLG caches every translated string locally, each piece of text is normally translated only once, resulting in very low API usage.
-
-## Feedback
-
-If you encounter any problems, click **Open Log Folder** in the mod settings and upload the generated log files to this mod's discussion page.
-
-## Donation
-
-This is my first mod. If you find it useful, I'd really appreciate it if you could buy me a coffee. ☕
 
 # **拯救语言不通**
 
+### V1.0稳定版发布啦！
+焕然一新！稳定版优化了很多地方，还新增了多个主流翻译引擎，大幅提升翻译速度，并且选项界面也得到了改造！
+
 ## 描述
 
-已经2026年了，我们的游戏居然还不支持 AI 翻译。有那么多有趣的模组和资产，却因为缺少本地化翻译，让玩家在使用时痛苦万分。众所周知，游戏内很多文本都是无法选中复制的，非母语玩家要么依靠贫瘠的词汇量理解，要么只能进行低效的手动翻译。
+从1代到2代，模组和资产的本地化翻译一直很依赖作者和社区贡献者。很多有趣的模组和资产，因为缺少本地化翻译，让非英语玩家在使用时很痛苦。但是在游戏内我们无法选中复制文本翻译，要么截图拍照识别，要么靠猜。
 
-于是我用 Qwen3.8-Max 做了这个模组（以下简称 **BLG**，不要问我为什么取这个缩写）。此前的大多数翻译模组基本都只涉及游戏本体文本和资产名称，而 **BLG 可以翻译你能看到的所有文字**。当屏幕上出现一段文本时，模组会自动调用你选择的翻译引擎，将其翻译成目标语言，你要做的仅仅只是等待几秒钟。
+于是我用 Qwen3.8-Max 做了这个模组（以下简称 **BLG**，我也不知道为什么缩写刚好是这三个字母）。此前的大多数翻译模组基本都只涉及游戏本体文本和官方资产名称，而 **BLG 可以翻译你能看到的所有文字**。无论是模组选项界面，还是资产信息视图，模组都会自动调用翻译引擎翻译成目标语言，你要做的仅仅只是等待几秒钟。
 
-BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产名称及描述、游戏内叠层文本（如道路名称、区域名称等）等。你可以自由选择启用其中的一项或多项。
+## 使用方法
 
-目前支持 **50 余种语言**。翻译时，段落末尾会显示“···”，表示该文本正在翻译或等待翻译。
+**订阅BLG→进入游戏的选项页面找到BLG→选择目标语言并保存→选择翻译范围→选择翻译引擎→启用翻译总开关**
 
-## 支持的翻译引擎
+目前支持 50 余种语言翻译。
 
-*   **DeepL**（需要 API Key，提供免费额度）
-*   **微软 AZURE**（需要 API Key 和 Region，提供免费额度）
-*   **百度**（需要 AppID + API Key，提供免费额度）
-*   **Google**（Google 无 Key 的免费接口似乎已经无法使用，后续我会尝试改为支持官方 Key 接口。）
+BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面板、资产名称及描述、游戏世界渲染文本（如道路名称、区域名称等），你可以自由启用其中的一项或多项。
 
-未来还会接入更多 AI 翻译模型。
+翻译引擎通常google翻译就足够了，如果你对上下文理解有更高的语义要求，可以选择AI翻译。目前已接入12个主流的免费翻译引擎，以及GPT、Claude等主流AI收费模型的API接入。当然，本模组也支持自定义API接口。
 
-如果你嫌注册 Key 太麻烦，我还有一个邪修方法：选择 **微软 AZURE**，然后把 Key 填成 **"中国"** 也可以直接翻译。我不确定这是否和我所在地区（中国）有关，不过你们可以多试几次。
+选择完必须测试引擎连通性，没问题再启用翻译。翻译时，段落末尾会显示“···”，表示该文本正在翻译或等待翻译。
 
 ## 兼容性
 
-我已经测试过 BLG 与 **I18N EVERYWHERE** 以及依赖它的本地化翻译模组的兼容性。由于不同翻译模组之间的覆盖顺序比较复杂，我直接说结论：
+我已经测试过 BLG 与 **I18N EVERYWHERE** 以及依赖它的本地化翻译模组的兼容性。如果它们的目标语言一致，BLG不会覆盖其它本地化模组；如果目标语言不一致，那么由于BLG的优先级是最高的，它就会覆盖。
 
-**由于 BLG 会自动翻译所有看到的、且不是目标语言的文本，因此它始终拥有最高优先级。即使之后被其它模组再次覆盖，只要玩家再次看到这些文字，BLG 就会重新覆盖回来——除非你一辈子都不再打开那个界面。**
+举个例子：如果你订阅了中文本地化翻译模组，那么进入游戏时，本地化模组会先把文本替换成中文。启用 BLG 后，由于BLG检测到文本已经是中文，因此会直接跳过翻译，不会覆盖。
 
-我知道有些玩家可能会担心冲突，但实际上影响并不大，因为 **BLG 会自动跳过已经是目标语言的文本**。
+但是如果你目标语言选了中文，有订阅日文的本地化翻译模组，那么 BLG 就会把被替换的日文再次翻译成中文。怎么解决呢？关闭翻译范围中有冲突的部分。
 
-举个例子：如果游戏语言设置为英文，目标语言设置为中文，同时订阅了中文本地化翻译模组，那么进入游戏时，本地化模组会先把文本替换成中文。启用 BLG 后，由于它检测到文本已经是中文，因此会直接跳过，不会再次覆盖本地化模组的翻译。
+例如，让游戏内的道路名称、区域名称等等都显示日文，而 BLG 只负责翻译资产名称、模组界面等游戏外的文本。
 
-2个模组会打架的情况举个例子：你目标语言选了日文，但又订阅了中文本地化翻译模组，那么 BLG 就会把替换过的中文再次翻译成日文。不过我想，应该不会有人这么无聊吧。
+我还测试了主流的十几款模组，目前测试还未发现问题，理论上，只要不是实时修改文本的，都不会产生冲突。如果有严重问题，可以发送日志到讨论区，或上报skyve。
 
-因此，你完全可以同时启用它们。例如，让本地化翻译模组负责游戏本体、道路名称等内容，而 BLG 负责翻译其它部分。当然，我还是建议你在翻译范围中关闭重叠的选项。
+## 其它说明
 
-其它类型的模组目前还没有全部测试，但理论上，只要与文本修改无关，都不会产生冲突。如果你正在使用例如 **Write Everywhere** 等可能存在潜在冲突的模组，欢迎在评论区反馈兼容情况。
-
-## 限制
-
-*   游戏内叠层文本属于实验性功能。出于性能考虑，目前只有在鼠标划过时才会覆盖翻译结果。例如，道路名称只有在鼠标移到上面时才会显示目标语言，否则仍会显示原语言。
 *   图片中的文字、贴图上的文字无法翻译（因为它们是像素，而不是字符串）。
 *   由于游戏内置字形并不完整，很多较冷门语言翻译后会直接显示为方块，因此目前仅保留了 50 余种能够正常显示的语言。
-*   个别段落可能会出现翻译失败的情况。请先尝试清除缓存，如果仍然无法解决，请把日志发送给我分析。
-
-## 性能影响
-
-需要说明的是，出于性能和一些技术上的考虑，我并没有在进入游戏时扫描并翻译所有文本，而是采用了\*\*懒翻译（实时翻译、实时生效）\*\*的方式。根据测试，对帧率和模拟速度的影响几乎可以忽略。
-
-你也不用担心每次重启游戏都需要重新翻译。BLG 会在第一次翻译后将结果缓存在本地，除非你清除了翻译缓存，或者原始文本发生了更新，否则之后都会直接使用缓存结果。
-
-## 隐私
-
-你的 API Key **仅以明文保存在本机**（用户数据目录下的 ModsSettings 文件夹），并且只会发送给你所选择的翻译服务。
-
-本模组**不会连接任何作者服务器，也不会收集任何统计数据或遥测信息。**
-
-## 免责声明
-
-本模组目前仍处于 **BETA** 测试阶段。
-
-所有译文均由第三方机器翻译接口生成，**不保证绝对准确**，可能存在错译、漏译或术语使用不当等情况。所有原文版权均归其原作者所有。
-
-所有翻译引擎均提供免费额度（并非无限制）。由于 BLG 会将每一段文本缓存到本地，因此同一段文字通常只会翻译一次，实际 API 消耗非常低。
-
-## 反馈
-
-如果遇到问题，请在本模组设置页面点击 **「打开日志文件夹」**，然后将生成的日志文件上传到本模组讨论区。
+*   出于性能和一些技术上的考虑，我并没有在进入游戏时扫描并翻译所有文本，而是采用了懒翻译（实时翻译、实时生效）的方式。根据测试，对帧率和模拟速度的影响几乎可以忽略。
+*   不用担心每次重启游戏都会重新翻译。BLG会在第一次翻译后将结果缓存在本地，除非你清除缓存，或者原文本有变动，否则后面都会直接调用缓存结果。
+*   你的 API Key 仅保存在本地，并且只会发送给你所选择的翻译服务。
+*   所有译文均由第三方翻译接口生成，**不保证绝对准确**。所有原文版权均归其原作者所有。
 
 ## 捐赠
 
@@ -179,34 +135,38 @@ BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产�
 </LongDescription>
 	<!--Thumbnail-->
 	<!--
-	  线上封面（covers/cover_1.jpg，4567x2817）是作者自己上传的那张「BRIDGE THE LANGUAGE GAP」横幅，
-	  和本仓库原先用 tools/thumbtool 生成的 950x500 图【完全不是同一张】（aHash 距离 30）。
-	  现在这份由它生成：tools/imgtool fit 等比缩到 811x500、居中在 950x500 画布上，
-	  两侧留白填的是封面自身边框均色 #0E1B2B，看起来像把外框加宽，不裁内容。
-	  为什么留白而不是裁切：ModPublisher 读 PNG 头校验规格，封面写死 950x500，
-	  而这张横幅是 1.62:1，硬裁到 1.9:1 会切掉标题与底部标语。
-	  代价：加了边之后 aHash 不再等于线上原图（构图被边框改变），所以封面这一项只能人眼确认。
-	  旧的那张留档在交接工作区 state/local-only-Thumbnail-950x500.png。
+	  v1.0.3 起封面换成作者新做的那张方形海报（1254x1254）。尺寸按作者要求没动，只换了编码：
+	  这张是连续调海报，无损 PNG 压到底还有 2,238,704 B，超服务端单图上限（PublishNewVersion 实测报
+	  "Image size should not exceed 2.1 MB"）；imgtool jpg q95 出 594,993 B，aHash 与原图距离 0。
+	  JPEG 也正是平台自己在用的封面格式（线上 CDN 存的是 covers/cover_1.jpg），
+	  v0.30 那一推里两张 .jpg 截图也是 PublishNewVersion 直接传上去过的。
+	  ⚠ 顺手核实掉一条旧假设：ModPublisher.dll 里搜不到 950/500 这两个常量（int 与 float 两种编码都试过），
+	  也不引用任何图像库；PrepareThumbnail / PrepareScreenshots 只把文件收进上传包，不校验几何。
+	  以前这里写的「ModPublisher 读 PNG 头校验规格，封面写死 950x500」是从官方模板占位图尺寸推出来的假设，
+	  不是工具的校验规则。真正会被拒的只有单图体积。
+	  上一版那张 950x500 的 Properties/Thumbnail.png 已从工作副本删掉（git 历史里还在）。
 	-->
-	<Thumbnail Value="Properties/Thumbnail.png" />
+	<Thumbnail Value="Properties/Thumbnail.jpg" />
 	<!--Screenshot, can be set multiple times-->
 	<!--
-	  四条按线上顺序排，编号与线上 screenshot_01..04 一一对应，格式也照线上原样：
-	  线上 01/02 本来就是 PNG（CDN 重编码过，alpha 被剥掉 → colorType 2），03/04 本来就是 JPEG。
-	  2026-09-06 实测推翻了「统一转成 PNG 更保险」这个判断：jpg 转 RGBA PNG 后 03/04 分别涨到
-	  2.8 MB / 3.2 MB，PublishNewVersion 直接报「Image size should not exceed 2.1 MB」而失败
-	  （Update 不校验图片大小，所以那次反而过了 —— 别拿 Update 的成功当 NewVersion 的凭据）。
-	  所以现在 Properties\Screenshot3.jpg / Screenshot4.jpg 与线上 CDN 那两份**逐字节一致**，
-	  不要再转格式。本地那张从未上线的旧图留档在交接工作区 state/local-only-Screenshot1.png。
+	  v1.0.3 起展示廊整组换成作者新传的 5 张，按数字顺序对应线上 screenshot_01..05。
+	  尺寸一律没动（1745x1178 / 1495x1052 / 1490x1056 / 1842x854 / 1752x898）。
+	  五张都过 imgtool optipng 无损重压：像素逐字节一致（工具自己读回来比对），只是换了
+	  逐行滤波器 + SmallestSize deflate，例如 769,080 → 591,696 B；最大的一张 2,089,365 B，在单图上限内。
+	  唯一一处不得已的取舍：4.png 原带一块 23,617 B 的 caBX（ChatGPT 写的 C2PA 内容凭证），
+	  留着就会顶破上限（2,112,982 B），所以只有这一张丢了它；另外四张的 caBX 与 sRGB/gAMA/pHYs 原样保留。
+	  上一版的 Screenshot3.jpg / Screenshot4.jpg（曾与线上 CDN 逐字节一致）已从工作副本删掉。
 	-->
-	<!-- 1 线上 screenshot_01：模组设置页整页中文，连左侧栏的模组名与控件标签都翻好了 -->
+	<!-- 1 模组选项页 TRANSLATION 标签：翻译总开关、目标语言（简体中文）、六项翻译范围，右侧英文说明正文 -->
 	<Screenshot Value="Properties/Screenshot1.png" />
-	<!-- 2 线上 screenshot_02：同一页在乌克兰语下的样子（作者手写标注 after） -->
+	<!-- 2 翻译前：Write Everywhere 自己的选项页（SOURCES / KEYBINDING / ABOUT）整页英文 -->
 	<Screenshot Value="Properties/Screenshot2.png" />
-	<!-- 3 线上 screenshot_03：资产信息面板 + 地图上的路名与区名，目标语言中文（作者标注 before） -->
-	<Screenshot Value="Properties/Screenshot3.jpg" />
-	<!-- 4 线上 screenshot_04：同一场景、目标语言乌克兰语（作者标注 after），资产名/资产描述/路名/区名都翻成了乌克兰语 -->
-	<Screenshot Value="Properties/Screenshot4.jpg" />
+	<!-- 3 翻译后：同一页翻成中文（作者标注 翻译后 / After Translation）—— 与 WE 共存时连它的 UI 也能翻 -->
+	<Screenshot Value="Properties/Screenshot3.png" />
+	<!-- 4 翻译前：资产信息面板（Monona Terrace 介绍正文、USER CREATED CONTENT）+ 地图上的世界文本，全英文 -->
+	<Screenshot Value="Properties/Screenshot4.png" />
+	<!-- 5 翻译后：同一场景（莫诺纳露台），资产名称、资产描述与世界叠层文本一起覆盖到 -->
+	<Screenshot Value="Properties/Screenshot5.png" />
 	<!--Tag, can be set multiple times-->
 	<!-- 线上 tags 就是这一个值（ModPublisher 会校验 Tag 字符串，别凭空猜） -->
 	<Tag Value="Code Mod" />
@@ -215,7 +175,7 @@ BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产�
 	<ForumLink Value="https://forum.paradoxplaza.com/forum/threads/bridge-the-language-gap-blg.1940349/" />
 	<!--Version of the mod-->
 	<!-- 与代码里 Mod.cs 载入横幅打出的版本号保持一致 -->
-	<ModVersion Value="0.30" />
+	<ModVersion Value="1.0.3" />
 	<!--Recommended version of the base game to use the mod-->
 	<!-- 线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1） -->
 	<GameVersion Value="1.6.*" />
@@ -227,20 +187,32 @@ BLG 的翻译范围包括游戏本体文本、模组选项及模组 UI、资产�
 	<RequiredDLC Value="" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
 	<ChangeLog>
-v0.30
+v1.0.3
 
-- Key bindings shown as separate letters (e.g. "W A S D") are no longer sent for translation.
-- Strings that are nothing but a placeholder (e.g. "{VALUE}") are no longer sent for translation.
-- When a translation service swallows the placeholder guard marks, that translation is now rejected and the original text is kept, so you no longer see empty boxes in the UI.
-- Settings are stored in a single file (ModsSettings\Cs2AutoTranslator.json); the extra .coc file is no longer created.
+- Added 8 free translation engines and merged them with the 4 that already existed: you now get 3 machine-translation engines that work out of the box, 4 that need a registered key, and 5 AI engines that need a key.
+- Added AI large-model API access billed by token usage, with 8 mainstream providers built in (GPT, DeepSeek, Claude and others) plus custom API endpoints. Token usage is counted and shown locally.
+- Added hotkey settings.
+- Reworked the settings UI: translation options, translation engines and everything else are now on separate tabs.
+- Reworked the translation mechanism and performance: "in-game overlay text" became "world-rendered text", which is now translated and refreshed automatically once you enter a save, with no manual step. Translating large amounts of text and multi-screen queued requests is also faster.
+- Reworked saving: every setting except the target language now saves in real time and takes effect immediately.
+- Rewrote descriptions, error messages and hints, and improved text display in several places.
+- Fixed the Google translation API endpoint.
+- Fixed known bugs, including dead endpoints being called over and over, and text getting translated again right after you clear the cache.
+- No longer conflicts with the Write Everywhere mod.
 
 中文
 
-- 空格分隔的键位串（例如 W A S D）不再送去翻译。
-- 纯占位符（例如 {VALUE}）不再送去翻译。
-- 翻译接口吞掉占位符保护标记时，该条译文判废并还原原文，界面上不再出现方块。
-- 设置只存 ModsSettings 下 Cs2AutoTranslator.json 一份，不再额外生成框架的 .coc 文件。
-	</ChangeLog>
+- 新增 8 个免费翻译引擎，并整合此前已有的 4 个引擎；当前支持 3 个可直接使用的机翻、4 个需注册 Key 的机翻、5 个需注册 Key 的 AI 翻译。
+- 新增 AI 大模型 API 接入，支持按 token 消耗进行翻译；内置 GPT、DeepSeek、Claude 等 8 家主流厂商，并支持自定义 API 接口，token 消耗将本地统计并显示。
+- 新增快捷键设置。
+- 优化设置界面，将翻译设置、翻译引擎及其他设置拆分为独立标签页。
+- 优化翻译机制与性能，将“游戏内叠层文本”调整为“游戏世界渲染文本”，现在进入存档后自动翻译并刷新，减少手动操作。同时提升了大量文本及多屏队列请求场景下的翻译速度。
+- 优化保存机制，除目标语言外，其余设置项现可实时保存并立即生效。
+- 优化说明、报错、提醒等文本，并改善多处文字显示效果。
+- 修复 Google 翻译 API 接口问题。
+- 修复失效接口反复调用、清除缓存仍会自动翻译等已知 BUG。
+- 现在不会再跟Write Everywhere模组发生冲突了。
+</ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<!-- 线上两条外链，类型与 URL 都照抄；开源链接同时是兼容性审查里「代码可见」的凭据 -->
 	<ExternalLink Type="github" Url="https://github.com/yuexian7/BridgeTheLanguageGap" />

@@ -18,27 +18,74 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
 		<!--
-		  Paradox Mods 上的代码模组各自捆绑 0Harmony.dll，且游戏内实际加载的是官方 Lib.Harmony 2.2.2.0。
-		  BepInEx 用的是 HarmonyX 2.9.0.0，依赖 Mono.Cecil / MonoMod.*，那些程序集在 CS2 的 Managed 目录里不存在，
-		  带上去会让 ModManager 报 MissedDependenciesError / LoadAssemblyReferenceError。必须用 2.2.2 且保持 copy-local。
+		  0Harmony.dll 必须由本模组自带：游戏本体的 Cities2_Data\Managed 里没有 Harmony，而 ModManager 按【简单名】
+		  绑定、不认版本号 ⇒ 一个会话里只有一份 Harmony 真正生效，谁先被加载谁替所有人定下 API。所以带的这份不能只挑
+		  「自己够用」的版本。
+		  2026-09-12 实测：Write Everywhere（主程序集 StationPylon.dll，引用 0Harmony 2.3.3.0）调
+		  HarmonyMethod.op_Implicit(MethodInfo)，而 2.2.2 根本没有这个方法 ⇒ 我们的 2.2.2 抢先生效时它在
+		  Mod.DoWhenLoaded 里抛 MissingMethodException。兼容是单向的：本机引用 2.2.2.0 的 I18NEverywhere／Time2Work／
+		  ExtraLib 实测都跑在 2.3.3 那一份上且无报错，反向不成立。
+		  ⚠ 把 Version 直接写成 2.3.3 走不通官方工具链：ModPostProcessor 内的 Unity.Burst ILHasher 解析这份
+		  2 195 456 B 的合并元数据时抛 BadImageFormatException: Read out of bounds（TypeRef 0x10000D0），且抛完进程
+		  不退出，构建会挂到超时。
+		  ⇒ 采用的形状：【编译与后处理照旧只见 2.2.2，在 RunModPostProcessor 之后、DeployWIP 之前把输出目录里的
+		  0Harmony.dll 换成 2.3.3 那份】，见下面的 SwapHarmonyRuntime。对本模组安全：我们全部 Harmony 调用面只有
+		  5 个成员，两份里逐条反射核对过都在 —— new Harmony(string)、Harmony.GetPatchInfo、PatchInfo.Owners、
+		  new HarmonyMethod(MethodInfo)、Harmony.Patch。
+		  ⚠ 代价（发布前要重新确认）：换进去的这份没经过官方 ILHasher 校验；包体 0.9 MB → 2.1 MB；生效范围是全会话，
+		  所有引用 2.3.3+ 的模组都会因此能用（引用 2.2.2 的照旧兼容）。
+		  ⚠ 另一条不能走的路：BepInEx 那套 HarmonyX 2.9.0.0 把 Mono.Cecil / MonoMod.* 拆成独立程序集，Managed 里没有，
+		  带上去会让 ModManager 报 MissedDependenciesError / LoadAssemblyReferenceError。
 		-->
 		<PackageReference Include="Lib.Harmony" Version="2.2.2" />
 	</ItemGroup>
 
 	<!--
-	  覆盖 Mod.targets 的同名 Target，唯一目的是给子进程注入 DOTNET_ROLL_FORWARD=Major：
-	  ModPostProcessor.exe 目标 net6.0，本机只有 .NET 8 运行时，它的 runtimeconfig.json 里又没写 rollForward，
-	  而官方 Target 的 Exec 没有带 EnvironmentVariables，不注入就报找不到运行时。
+	  PackageDownload 只把包取到本机 NuGet 缓存（精确版本要用 [x.y.z] 区间语法），不进引用图、不会被 copy-local 到输出
+	  目录，纯粹给下面的 SwapHarmonyRuntime 当 2.3.3 那份 dll 的来源。
+	  为什么不 vendor 进仓库：那是 2 195 456 B 的二进制，而本目录是个有 GitHub remote 的 git 仓库。
+	-->
+	<ItemGroup>
+		<PackageDownload Include="Lib.Harmony" Version="[2.3.3]" />
+	</ItemGroup>
+
+	<PropertyGroup>
+		<HarmonyRuntimePackageDir>$(NuGetPackageRoot)lib.harmony\2.3.3\</HarmonyRuntimePackageDir>
+		<HarmonyRuntimeDll>$(HarmonyRuntimePackageDir)lib\net48\0Harmony.dll</HarmonyRuntimeDll>
+	</PropertyGroup>
+
+	<!--
+	  覆盖 Mod.targets 的同名 Target，两个目的：
+	  (1) 给子进程注入 DOTNET_ROLL_FORWARD=Major —— ModPostProcessor.exe 目标 net6.0，本机只有 .NET 8 运行时，
+	      它的 runtimeconfig.json 里又没写 rollForward，而官方 Target 的 Exec 没带 EnvironmentVariables，
+	      不注入就报找不到运行时。
+	  (2) 在 Exec 之后把输出目录里那份 2.2.2 的 0Harmony.dll 换成 2.3.3（见文件头 Lib.Harmony 那段）。
 
 	  BeforeTargets="DeployWIP" 是修正执行顺序的关键。官方 Mod.targets 里 RunModPostProcessor 声明在 DeployWIP
 	  之前，所以官方顺序是「先后处理、再部署」；但 csproj 对同名 Target 的重声明位于 <Import> 之后，
 	  只靠 AfterTargets="AfterBuild" 会被排到 DeployWIP 后面，于是部署目录（= 发布时上传的 ContentFolder）
 	  里留下的是后处理之前的程序集。显式声明 BeforeTargets 才能恢复官方顺序。
+
+	  ⚠ 换 dll 为什么写在 Target 体内而不是另开一个 Target：实测证明「另开 Target + AfterTargets=RunModPostProcessor」
+	  仍然先于后处理执行（构建日志里 SwapHarmonyRuntime 那行印在 Run post processor 之前）—— MSBuild 不按
+	  AfterTargets/BeforeTargets 做拓扑排序，跨 Target 的相对顺序只由提交顺序决定。同 Target 内的任务程序顺序才是硬保证。
+	  ⚠ 位置错会怎样：Burst ILHasher 解析 OutDir 里那份 2 195 456 B 的合并元数据时抛
+	  BadImageFormatException: Read out of bounds（TypeRef 10000D0），且子进程抛完不退出、构建挂到超时。
+	  ⚠ 另有一条同名 Target 绝不能同时存在两份：MSBuild 里后声明者整体覆盖先声明者，留两份等于把换 dll 静默删掉。
+	  官方 Mod.targets 的 ClearOutput 每次构建都 RemoveDir $(OutDir)，所以 copy-local 必然重新放回 2.2.2、
+	  这段替换每次构建都会真的执行一次，不存在「上一次换的没被覆盖」这种中间状态。
+	  SkipUnchangedFiles=false：宁可在没变化时也重抄一遍，不给「目标比源新所以跳过」留静默退回旧文件的机会。
+	  只带 dll、不带 0Harmony.xml／pdb：那两个对游戏没用，却会让发布包白胖 269 KB 以上。
 	-->
 	<Target Name="RunModPostProcessor" AfterTargets="AfterBuild" BeforeTargets="DeployWIP" Condition="'$(NeedBuild)'">
 		<Error Condition="!Exists('$(ModPostProcessorFullPath)')" Text="Post processor not found, please check the path: $(ModPostProcessorFullPath)" />
 		<Message Text="Run post processor: $(ModPostProcessorArgs)" Importance="high" />
 		<Exec Command="$(ModPostProcessorArgs)" EnvironmentVariables="DOTNET_ROLL_FORWARD=Major" LogStandardErrorAsError="true" />
+
+		<!-- 下面三步必须在 Exec 之后：见上面的位置硬约束。Exec 失败时 MSBuild 不会走到这里，不会产出半套产物。 -->
+		<Error Condition="!Exists('$(HarmonyRuntimeDll)')" Text="找不到 2.3.3 的 0Harmony.dll：$(HarmonyRuntimeDll) —— 本机 NuGet 缓存被清过，联网跑一次 dotnet restore 让 PackageDownload 取回来。不能退回 2.2.2：那会让所有引用 Harmony 2.3.3+ 的模组（如 Write Everywhere）在本模组所在的会话里抛 MissingMethodException。" />
+		<Copy SourceFiles="$(HarmonyRuntimeDll)" DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" SkipUnchangedFiles="false" />
+		<Message Text="SwapHarmonyRuntime: $(OutDir)0Harmony.dll 已换成 2.3.3" Importance="high" />
 	</Target>
 
 	<!--

@@ -48,7 +48,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.0.3：免费翻译引擎扩到 12 家；新增 GPT/DeepSeek/Claude 等 AI 大模型接口与自定义 API，本地统计 token 消耗；新增快捷键设置；设置界面拆成翻译/引擎/其它标签页；游戏世界渲染文本进存档后自动翻译；除目标语言外实时保存并生效；部署的 0Harmony.dll 换成 2.3.3 以消除与 Write Everywhere 的冲突) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.0.4：设置界面「快捷键与其它」页在日志板块下方新增「关于」板块，显示模组版本与作者并给出三个跳转按钮；模组自身界面文案按游戏官方语言包逐条校对用词) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -3074,25 +3074,84 @@ namespace Cs2AutoTranslator
     }
 
     // 需求1：谷歌直连网页版翻译接口，免注册免 key，所以排在引擎下拉框第一位、也是本模组的默认引擎。
-    // 2026-09-08：client=gtx 已被反爬拦截（429），dict-chrome-ex 仍可用 —— 所以 client 与域名都要轮询，见 FreeApi.GoogleClients。
+    // 现在有【两条通道】，任一能用就翻得出来，玩家不用管：
+    //   通道① 网页版自用的 batchexecute（2026-09-25 加，第一顺位）；
+    //   通道② translate_a 的 client×域名轮询（2026-09-08 起 gtx 已被拦，靠 dict-chrome-ex 顶着）。
+    // 为什么要两条、实测数据是什么，全写在 FreeApi 那段注释里（含「不是玩家节点挂了」的取证过程），此处不重复。
     internal sealed class GoogleEngine : EngineBase
     {
         // 上次成功的 client 与域名下标。粘住它们，免得每条文本都从头白试一遍（每个组合 8 秒超时）。
         private static int _clientIndex;
         private static int _hostIndex;
 
+        // 通道①连续失败到这个次数就先别再走它 —— 每条文本都白等一轮超时太浪费。
+        // 但不永久放弃：之后每 WebProbeEvery 条再探一次。玩家换个节点、或谷歌哪天把这个出口 IP 放出来，
+        // 模组自己会走回第一顺位，不需要重开游戏。
+        private const int WebGiveUpAfter = 3;
+        private const int WebProbeEvery = 50;
+        private static int _webFails;
+        private static int _webSkipped;
+        private static int _lastWebStatus;      // 只给日志看：0 = 这次压根没拿到响应（超时/DNS/连接被重置）
+
         public GoogleEngine() : base(TranslatorSetting.Engine.Google) { }
 
         public override bool IsConfigured(TranslatorSetting s) => true;   // 完全免注册免 key
+
+        // 通道①：谷歌网页版翻译框自己发的那条 batchexecute 请求（表单 POST，无 cookie 即可）。
+        // 成功返回译文并清零失败计数；失败返回 null，原因已经记进 failures 交给总日志。
+        private string TryWeb(string text, string tl, List<string> failures)
+        {
+            try
+            {
+                string resp = Http.Post(FreeApi.GoogleWebUrl, FreeApi.GoogleWebBody(text, tl, "auto"), wc =>
+                {
+                    BrowserUa(wc);
+                    // Http.Post 默认按 JSON 发，这条接口要的是表单，不改这一行谷歌回 400。
+                    wc.Headers[HttpRequestHeader.ContentType] = "application/x-www-form-urlencoded;charset=UTF-8";
+                });
+                string r = EngineKit.ParseResponse(Name, null, resp);
+                if (!string.IsNullOrEmpty(r))
+                {
+                    if (_webFails > 0) ModLog.Info("[Google] 网页通道恢复（此前连失败 " + _webFails + " 次），已切回第一顺位。");
+                    _webFails = 0;
+                    _webSkipped = 0;
+                    return r;
+                }
+                _webFails++;
+                _lastWebStatus = 0;      // 这次是真拿到了 200、只是解不出译文 —— 别把上一次的异常状态码留着误导排查
+                failures.Add("web 返回空：" + Probe.Trunc(resp ?? "", 120));
+            }
+            catch (Exception ex)
+            {
+                _webFails++;
+                _lastWebStatus = Http.StatusOf(ex);
+                failures.Add("web → " + ex.Message);
+            }
+            // 只在「第一次失败」和「刚放弃」这两档各记一条：状态码含义排查时要用，但每条文本刷一行会把日志埋了。
+            if (_webFails == 1 || _webFails == WebGiveUpAfter)
+                ModLog.Error("[Google] 网页接口不通（第 " + _webFails + " 次，状态码 " + _lastWebStatus + "）。"
+                             + "429 或 302 跳到 sorry 是谷歌按【出口 IP】拦的，与节点快慢、与模组设置无关；本次改走备用接口。");
+            return null;
+        }
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
             if (string.IsNullOrEmpty(text)) return null;
             string tl = Lang.Google(toLocale);
-            int hosts = FreeApi.GoogleHosts.Length, clients = FreeApi.GoogleClients.Length;
             // 每一次失败都留一条。原来只记最后一条，结果日志里只看得到 .cn 的 404，
             // 把真正说明问题的 429 全掩盖了 —— 排查时等于没有日志。
             var failures = new List<string>();
+
+            bool tryWeb = _webFails < WebGiveUpAfter;
+            if (!tryWeb && ++_webSkipped >= WebProbeEvery) { _webSkipped = 0; tryWeb = true; }   // 攒够条数再探一回
+            if (tryWeb)
+            {
+                string web = TryWeb(text, tl, failures);
+                if (web != null) return web;
+            }
+
+            // 通道②：translate_a 老端点，两个域名 × 两个 client 轮询。
+            int hosts = FreeApi.GoogleHosts.Length, clients = FreeApi.GoogleClients.Length;
             for (int attempt = 0; attempt < hosts * clients; attempt++)
             {
                 int ci = (_clientIndex + attempt / hosts) % clients;
@@ -3117,7 +3176,8 @@ namespace Cs2AutoTranslator
                 }
                 catch (Exception ex) { failures.Add(tag + " → " + ex.Message); }
             }
-            ModLog.Error("[Google] " + (hosts * clients) + " 个 client×域名组合全部失败："
+            ModLog.Error("[Google] 两条通道全部失败（网页接口 " + (_webFails > 0 ? "已连失败 " + _webFails + " 次" : "未走")
+                         + "，备用接口 " + (hosts * clients) + " 个 client×域名组合）："
                          + Probe.Trunc(string.Join(" | ", failures.ToArray()), 900));
             return null;
         }

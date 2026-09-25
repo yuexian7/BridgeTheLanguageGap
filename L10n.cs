@@ -113,7 +113,7 @@ namespace Cs2AutoTranslator
                 + "Google Gemini（AI）：最懂遊戲語境，速度偏慢\n"
                 + "Groq Cloud（AI）：AI裡最快\n"
                 + "OpenRouter（AI）：模型聚合站，有免費檔\n"
-                + "矽基流動（AI）：大陸可直連，免費檔也要帳戶裡有餘額\n"
+                + "矽基流動（AI）：大陸可直連，免費檔也要帳號裡有餘額\n"
                 + "Cloudflare（AI）：每天有免費額度\n"
                 + "自訂AI（消耗token）：自備key，費用自理";
         }
@@ -128,13 +128,20 @@ namespace Cs2AutoTranslator
                 "언어 장벽 해소", "Pokonaj barierę językową", "Supere a barreira do idioma", "Преодолей языковой барьер", "拯救语言不通", "拯救語言不通");
 
             // 需求1：三个标签页。新键用 AddEnZh（英文源 + 简繁中），其余 9 种官方语言由 SelfL10n 机翻兜底。
+            // v1.0.4 术语校对（需求2）：
+            //   · 英文 "Hotkeys" → "Shortcuts"，对齐官方设置页分节名 Options.GROUP[Input.Shortcuts]
+            //     （官方 EN 全文 0 次 hotkey）；这一格同时决定其余 9 种语言的机翻落点。
+            //   · 繁中原来一页写「快速鍵」、另一页写「快捷鍵」，同一件事两个名字。统一成「快捷鍵」。
+            //     ⚠ 官方繁中对 Shortcuts 那节用的是「捷徑」（Options.INPUT_MAP[Shortcuts]），这里刻意不跟：
+            //     「捷徑」在台湾日常更像"桌面快捷方式"，当设置分节名反而更容易误认；简中官方正是「快捷键」，
+            //     与本文统一。要改成官方那词，只需把下面两格的 快捷鍵 换成 捷徑。
             AddEnZh(t, "tab.translate", "Translation", "翻译设置", "翻譯設定");
             AddEnZh(t, "tab.engine", "Translation engine", "翻译引擎", "翻譯引擎");
-            AddEnZh(t, "tab.misc", "Hotkeys & other", "快捷键与其它", "快速鍵與其它");
+            AddEnZh(t, "tab.misc", "Shortcuts & other", "快捷键与其它", "快捷鍵與其它");
 
-            AddEnZh(t, "group.engine", "Choose an engine", "选择引擎", "選擇引擎");
+            AddEnZh(t, "group.engine", "Choose a translation engine", "选择引擎", "選擇引擎");
             AddEnZh(t, "group.test", "Test", "测试", "測試");
-            AddEnZh(t, "group.hotkeys", "Hotkeys", "快捷键设置", "快速鍵設定");
+            AddEnZh(t, "group.hotkeys", "Shortcuts", "快捷键设置", "快捷鍵設定");
             AddEnZh(t, "group.log", "Log", "日志", "日誌");
             AddEnZh(t, "group.disclaimer", "Disclaimer", "声明", "聲明");
 
@@ -149,18 +156,26 @@ namespace Cs2AutoTranslator
 
             // 反馈3：正文按用户原文四段照录，段间用 \n（与下面 desc.engine 那条 14 行清单同一条渲染路径，实机可换行）。
             // 语种从「12 份手写」改成「英/简/繁 + 机翻兜底」：这段字多且还会随反馈再改，手写 12 份只会有一份是新的。
+            // v1.0.4 术语校对（需求2）：英文源是其余 9 种语言的机翻输入，所以三处措辞在这里改的是英文：
+            //   · "hotkey" → "shortcut"（官方 EN 全文 0 次 hotkey，设置页那一节叫 Shortcuts，
+            //     凭据 Options.GROUP[Input.Shortcuts] / Options.INPUT_MAP[Shortcuts]）。
+            //   · "entering a save" → "loading a save game"（裸 save + entering 不是游戏里的说法，
+            //     机翻到 de/es/it 容易把名词"存档"翻成动词"保存"；官方是 Common.ACTION[Save Game]）。
+            //   · "in-game world text" → "text in the game world"（同上，且官方不说 world-rendered 这种复合词）。
+            // 简中/繁中的「区域名称」改成官方对 District 的叫法「市辖区名称／行政區名稱」
+            //   （凭据 Tutorials.TITLE[DistrictTutorialName] = District Name）。
             AddEnZh(t, "desc.enabled",
                 "Please set the language, scope and translation engine first, and only then turn this on.\n"
                 + "Don't worry — turning this off does not clear the translations.\n"
-                + "With in-game world text turned on, loading a large city for the first time can take a while to translate road names, district names and the like; you are free to keep building while you wait. If you are testing a paid AI translation engine, try not to test it right after entering a save, because every single test re-translates all of that rendered text and that costs real money (you can also switch this option off while testing).\n"
-                + "How long translation takes depends on how much text the current panel has. If text inside the game comes out partly untranslated, takes too long, or does not show up at all, try turning translation off and back on again (the hotkey is more convenient), or switch to another translation engine.",
+                + "With text in the game world turned on, loading a large save game for the first time can take a while to translate road names, district names and the like; you are free to keep building while you wait. If you are testing a paid AI translation engine, try not to test it right after loading a save game, because every single test re-translates all of that rendered text and that costs real money (you can also switch this option off while testing).\n"
+                + "How long translation takes depends on how much text the current panel has. If text inside the game comes out partly untranslated, takes too long, or does not show up at all, try turning translation off and back on again (the shortcut is more convenient), or switch to another translation engine.",
                 "请在设置好语言、范围及翻译引擎之后再启用。\n"
                 + "请放心，译文不会在关闭后清除。\n"
-                + "打开游戏世界渲染文本时，第一次加载大城市可能会消耗较多时间翻译道路名、区域名称等，你完全可以一边等待一边继续建设你的城市。如果你在测试收费的AI翻译引擎，尽量不要在进入游戏后测试，否则每次测试都会重新翻译这些渲染文本，很费钱的（你也可以关掉这个选项再测试）。\n"
+                + "打开游戏世界渲染文本时，第一次加载大城市可能会消耗较多时间翻译道路名、市辖区名称等，你完全可以一边等待一边继续建设你的城市。如果你在测试收费的AI翻译引擎，尽量不要在进入游戏后测试，否则每次测试都会重新翻译这些渲染文本，很费钱的（你也可以关掉这个选项再测试）。\n"
                 + "翻译时间与当前界面的文字数相关。游戏内若出现翻译不全、翻译过久、翻译不显示的情况，尝试关闭翻译再重新启用（快捷键更方便），或切换其它翻译引擎。",
                 "請在設定好語言、範圍及翻譯引擎之後再啟用。\n"
                 + "請放心，譯文不會在關閉後清除。\n"
-                + "開啟遊戲世界渲染文字時，第一次載入大城市可能會花費較多時間翻譯道路名、區域名稱等，你完全可以一邊等待一邊繼續建設你的城市。如果你在測試收費的AI翻譯引擎，盡量不要在進入遊戲後測試，否則每次測試都會重新翻譯這些渲染文字，很花錢的（你也可以關掉這個選項再測試）。\n"
+                + "開啟遊戲世界渲染文字時，第一次載入大城市可能會花費較多時間翻譯道路名、行政區名稱等，你完全可以一邊等待一邊繼續建設你的城市。如果你在測試收費的AI翻譯引擎，盡量不要在進入遊戲後測試，否則每次測試都會重新翻譯這些渲染文字，很花錢的（你也可以關掉這個選項再測試）。\n"
                 + "翻譯時間與目前介面的文字數相關。遊戲內若出現翻譯不全、翻譯過久、翻譯不顯示的情況，嘗試關閉翻譯再重新啟用（快捷鍵更方便），或切換其它翻譯引擎。");
 
             // ===== 目标语言与保存分组（需求 7：置于翻译范围下方）=====
@@ -193,17 +208,17 @@ namespace Cs2AutoTranslator
             AddEnZh(t, "label.engineNotes", "Notes: ", "说明：", "說明：");
 
             AddEnZh(t, "notes.google",
-                "No sign-up and no key — works right away. If one endpoint gets rate-limited the mod switches to another on its own.",
-                "免注册免 key，装上就能用。某个通道被限流时会自动换下一个，不用你管。",
-                "免註冊免 key，裝上就能用。某個通道被限流時會自動換下一個，不用你管。");
+                "No account and no API key — works right away. Google has two free endpoints and the mod tries both on its own; if both fail, Google is blocking your current exit IP, so changing node or engine is what helps.",
+                "免注册免 key，装上就能用。谷歌有两条免 key 通道，本模组会自动轮流试，不用你管。两条都不通就是谷歌在拦你当前的出口 IP，换节点或换引擎才有用。",
+                "免註冊免 key，裝上就能用。谷歌有兩條免 key 通道，本模組會自動輪流試，不用你管。兩條都不通就是谷歌在攔你當前的出口 IP，換節點或換引擎才有用。");
 
             AddEnZh(t, "notes.duckduckgo",
-                "No sign-up and no key. As of 2026-09 its keyless endpoint rejects this mod's requests, which may vary by region or network — if it fails, switch to Google.",
+                "No account and no API key. As of 2026-09 its key-free endpoint rejects this mod's requests, which may vary by region or network — if it fails, switch to Google.",
                 "免注册免 key。2026-09 实测它的免 key 通道会拒绝本模组的请求，可能因地区或网络而异；不通就换 Google。",
                 "免註冊免 key。2026-09 實測它的免 key 通道會拒絕本模組的請求，可能因地區或網路而異；不通就換 Google。");
 
             AddEnZh(t, "notes.mymemory",
-                "5,000 characters a day without a key, or 50,000 a day if you optionally add an email. Average quality — best kept as an emergency backup.",
+                "5,000 text characters a day without an API key, or 50,000 a day if you optionally add an email address. Average quality — best kept as an emergency backup.",
                 "不填邮箱每天 5000 字符，选填邮箱提到每天 5 万字符。质量中等，适合当应急备用。",
                 "不填信箱每天 5000 字元，選填信箱提到每天 5 萬字元。品質中等，適合當應急備用。");
 
@@ -213,12 +228,12 @@ namespace Cs2AutoTranslator
                 "Yandex 已經關掉了免 key 的網頁通道，現在必須填 IAM 權杖才能用。");
 
             AddEnZh(t, "notes.microsoft",
-                "Free F0 tier: 2 million characters a month, the most accurate machine translation overall. After creating the Translator resource the region must match; leave it empty for a Global resource.",
+                "Free F0 tier: 2 million text characters a month, the most accurate machine translation overall. After creating the Translator resource the region must match; leave it empty for a Global resource.",
                 "免费 F0 层每月 200 万字符，机器翻译里综合最准。建好 Translator 资源后区域要填对，全球（Global）资源留空。",
                 "免費 F0 層每月 200 萬字元，機器翻譯裡綜合最準。建好 Translator 資源後區域要填對，全球（Global）資源留空。");
 
             AddEnZh(t, "notes.deepl",
-                "500,000 free characters a month and the most natural wording.",
+                "500,000 free text characters a month and the most natural wording.",
                 "免费每月 50 万字符，译文最自然；中国大陆通常需 VPN。",
                 "免費每月 50 萬字元，譯文最自然。");
 
@@ -238,14 +253,14 @@ namespace Cs2AutoTranslator
                 "有免費額度，是 AI 引擎裡最快的，免費層只有速率限制。");
 
             AddEnZh(t, "notes.openrouter",
-                "A model aggregator; free models have names ending in :free. After clicking \"Fetch model list\" every model your key can use is listed, and the ones that suit translation come first among the free ones. Free models share one upstream capacity lane, so a popular one often answers 429 (too busy) — switching to another free model usually fixes it.",
+                "An AI model aggregator; free models have names ending in :free. After clicking \"Fetch AI model list\" every AI model your API key can use is listed, and the ones that suit translation come first among the free ones. Free models share one upstream capacity lane, so a popular one often answers 429 (too busy) — switching to another free model usually fixes it.",
                 "模型聚合站，免费档模型的名字以 :free 结尾；点「获取模型列表」后会列出你这个 key 能用的全部模型，免费档里适合翻译的排在最前面。免费档共用一条上游产能通道，热门那几个经常回「太挤了」（429），换一个免费档一般就好了。",
                 "模型聚合站，免費檔模型的名字以 :free 結尾；按「取得模型清單」後會列出你這個 key 能用的全部模型，免費檔裡適合翻譯的排在最前面。免費檔共用一條上游產能通道，熱門那幾個經常回「太擠了」（429），換一個免費檔一般就好了。");
 
             AddEnZh(t, "notes.siliconflow",
-                "Several nominally free models, and the endpoint is reachable directly from mainland China; registration needs a mainland phone number. After clicking \"Fetch model list\" every model is listed, with the free ones first. Heads-up: even those models are billed against your account balance, so a zero-balance account keeps answering “insufficient balance” — top up, or use Groq / OpenRouter instead.",
+                "Several nominally free models, and the endpoint is reachable directly from mainland China; registration needs a mainland phone number. After clicking \"Fetch AI model list\" every model is listed, with the free ones first. Heads-up: even those models are billed against your account balance, so a zero-balance account keeps answering “insufficient balance” — top up, or use Groq / OpenRouter instead.",
                 "有多个标称免费的模型，中国大陆可直连；注册需国内手机号。点「获取模型列表」后会列出全部模型，免费的排在最前面。要注意：这里标称免费的模型照样按账户余额扣费，余额为 0 时会一直回「余额不足」——充值再用的话可以，否则建议改用 Groq 或 OpenRouter。",
-                "有多個標稱免費的模型。按「取得模型清單」後會列出全部模型，免費的排在最前面。要注意：這裡標稱免費的模型照樣按帳戶餘額扣費，餘額為 0 會一直回「餘額不足」——儲值再用可以，否則建議改用 Groq 或 OpenRouter。");
+                "有多個標稱免費的模型。按「取得模型清單」後會列出全部模型，免費的排在最前面。要注意：這裡標稱免費的模型照樣按帳號餘額扣費，餘額為 0 會一直回「餘額不足」——儲值再用可以，否則建議改用 Groq 或 OpenRouter。");
 
             AddEnZh(t, "notes.cloudflare",
                 "A free daily allowance on the dedicated m2m100 translation model. Needs a Cloudflare account, with both the Account ID and an API token. Supports fewer languages than the other engines.",
@@ -253,7 +268,7 @@ namespace Cs2AutoTranslator
                 "每天有免費額度，用 m2m100 專用翻譯模型。需註冊 Cloudflare 帳號，Account ID 與 API 權杖都要填；支援的語言比其它引擎少。");
 
             AddEnZh(t, "notes.custom",
-                "Bring your own key. Eight vendors’ API formats are built in; pick “Custom” to fill in the address, key, model name and API format yourself. Quota and cost follow your own plan.",
+                "Bring your own API key. Eight vendors’ API formats are built in; pick “Custom” to fill in the address, key, model name and API format yourself. Quota and cost follow your own plan.",
                 "自备 key。内置 gpt／claude／kimi／qwen／DeepSeek／gemini／grok／glm 八家接口格式；也可以选「自定义」，接口地址、key、模型名称与接口格式全部自己填。额度与费用按你自己的套餐算。",
                 "自備 key。內建 gpt／claude／kimi／qwen／DeepSeek／gemini／grok／glm 八家介面格式；也可以選「自訂」，介面位址、key、模型名稱與介面格式全部自己填。額度與費用依你自己的方案算。");
 
@@ -270,7 +285,7 @@ namespace Cs2AutoTranslator
                 "點中這一行，然後直接按下你想要的鍵就設好了 —— 與遊戲裡其他地方設快捷鍵的方式完全一樣，不需要輸入任何字母，按 Esc 可以取消。兩項快捷鍵預設都是空的，由你自己設定，設定後重啟遊戲會保留。按下這個鍵會就地開/關翻譯，不必回到選項介面，模組目前是關閉狀態時也一樣管用。");
 
             AddEnZh(t, "desc.hotkey.retranslate",
-                "Same control as the row above: click it and press a key to bind, Esc to cancel. Pressing it drops the cached translations and translates the interface again with your current settings — handy right after you change the target language or the engine.",
+                "Same control as the row above: click it and press a key to assign it, Esc to cancel. Pressing it drops the cached translations and translates the interface again with your current settings — handy right after you change the target language or the engine.",
                 "与上面那行相同的控件：点中后按下要用的键即完成设置，按 Esc 取消。按这个键会清掉已缓存的译文，并按你当前的设置把界面重新翻译一遍，换目标语言或换引擎之后正用得上。",
                 "與上面那行相同的控件：點中後按下要用的鍵即完成設定，按 Esc 取消。按這個鍵會清掉已快取的譯文，並依你目前的設定把介面重新翻譯一遍，換目標語言或換引擎之後正用得上。");
 
@@ -313,9 +328,12 @@ namespace Cs2AutoTranslator
             // 测试结果里要说出到底缺哪一项（Mod.FieldLabel），field 名由 EngineKit.MissingField 给。
             AddEnZh(t, "field.key", "API key", "API 密钥", "API 金鑰");
             AddEnZh(t, "field.appid", "APP ID", "APP ID", "APP ID");
-            AddEnZh(t, "field.accountid", "Account ID", "账户 ID", "帳戶 ID");
+            // v1.0.4 术语校对（需求2）：Account 一词按官方对齐（官方简中「账号」55 次 /「账户」2 次，
+            // 繁中「帳號」54 次 /「帳戶」0 次；凭据 Paradox.REGISTRATION_FROM_LOGIN_LINK、Menu.NOTIFICATION_DESCRIPTION[PDXAccount]）。
+            // ⚠ 但「账户余额」这四个字保留：官方简中正好就这么写（SelectedInfoPanel.COMPANY_BANK_BALANCE = 账户余额）。
+            AddEnZh(t, "field.accountid", "Account ID", "账号 ID", "帳號 ID");
             AddEnZh(t, "field.token", "API token", "API 令牌", "API 權杖");
-            AddEnZh(t, "field.model", "model name", "模型名", "模型名");
+            AddEnZh(t, "field.model", "AI model name", "模型名", "模型名");
             AddEnZh(t, "field.baseurl", "API base URL", "接口地址", "介面位址");
 
             // 需求2：token 计数。平台报了 usage 就用真值，没报就按字数本地估算，所以必须写明「可能有出入」。
@@ -352,15 +370,15 @@ namespace Cs2AutoTranslator
                 "번역 범위", "Zakres tłumaczenia", "Escopo da tradução", "Область перевода", "翻译范围", "翻譯範圍");
 
             Add(t, "label.scope.modOptions",
-                "Mod-Einstellungen & In-Game-Panels", "Mod settings & in-game panels", "Ajustes de mods y paneles del juego", "Paramètres de mods et panneaux en jeu", "Impostazioni mod e pannelli di gioco", "Mod設定とゲーム内パネル",
+                "Mod-Einstellungen & Panels im Spiel", "Mod settings & in-game panels", "Ajustes de mods y paneles del juego", "Paramètres de mods et panneaux en jeu", "Impostazioni mod e pannelli di gioco", "Mod設定とゲーム内パネル",
                 "모드 설정 및 게임 내 패널", "Ustawienia modów i panele w grze", "Configurações de mods e painéis no jogo", "Настройки модов и внутриигровые панели", "模组设置项及游戏内面板", "模組設定項及遊戲內面板");
 
             Add(t, "desc.scope.modOptions",
                 "Übersetzt die Beschriftungen und Beschreibungen der Mod-Einstellungen im Optionsmenü sowie die Panel-Texte, die Mods im Spiel anzeigen.",
                 "Translates the setting labels and descriptions of mods in the options menu, and the panel text mods show inside the game.",
                 "Traduce las etiquetas y descripciones de los ajustes de los mods en el menú de opciones, y los textos de los paneles que los mods muestran en el juego.",
-                "Traduit les libellés et descriptions des réglages des mods dans le menu des options, ainsi que les textes des panneaux affichés en jeu par les mods.",
-                "Traduce le etichette e le descrizioni delle impostazioni dei mod nel menu opzioni e i testi dei pannelli che i mod mostrano nel gioco.",
+                "Traduit les libellés et descriptions des paramètres des mods dans le menu des options, ainsi que les textes des panneaux affichés en jeu par les mods.",
+                "Traduce le etichette e le descrizioni delle impostazioni dei mod nel menu opzioni e i testi dei pannelli che le mod mostrano nel gioco.",
                 "オプションメニュー内のMod設定のラベルと説明、およびModがゲーム内に表示するパネルの文章を翻訳。",
                 "옵션 메뉴에서 모드 설정의 레이블과 설명, 그리고 모드가 게임 안에 표시하는 패널 텍스트를 번역합니다.",
                 "Tłumaczy etykiety i opisy ustawień modów w menu opcji oraz teksty paneli, które mody wyświetlają w grze.",
@@ -377,58 +395,84 @@ namespace Cs2AutoTranslator
                 "注意：部分模组的游戏内面板文字是写死在模组文件里的，本模组读不到这些文字，因此既无法翻译也无法修改。",
                 "注意：部分模組的遊戲內面板文字是寫死在模組檔案裡的，本模組讀不到這些文字，因此既無法翻譯也無法修改。");
 
+            // v1.0.4 术语校对（需求2）：Asset 一词按【游戏官方各语言写法】逐列对齐，凭据
+            // Editor.ASSETS / Editor.ASSET_NAME / Editor.ASSET_DESCRIPTION / Menu.ASSET_NAME（官方词典在
+            // 工作区 state\official-locale\parsed\，22165 条/key）：de 保留 Asset（官方 de 自己就用 Asset），
+            // es Recursos / fr Ressources / it Elementi / pt Elementos / ru Объекты —— 官方这五套写法里
+            // 根本没有 asset 这个词根（es、pt、ru 全库 0 次，fr 仅 2 次），玩家在游戏里永远看不到 "asset"。
+            // ja アセット / ko 에셋 / pl Zasoby 原本就与官方一致，不动。
+            // 另外「asset 标题下方」这种说法官方那一栏叫【名称】不叫标题（Editor.ASSET_NAME 各语言都是
+            // "…Name"），所以 12 列一起从"标题"改成"名称"。
+            // ⚠ 复核推翻了两条建议：① 繁中 資產→素材 不成立（官方自己分裂：素材 39 处 / 資產 31 处，
+            //    且 Editor.* 那一侧用 資產），保持 資產；② 俄语 мод→модификация 不采纳（官方 103:5 虽悬殊，
+            //    但机翻列仍会把英文 "mod" 翻成 мод，只改手写列会造成同一界面两套词，得不偿失）。
             Add(t, "label.scope.assetNames",
-                "Asset-Namen", "Asset names", "Nombres de assets", "Noms d’assets", "Nomi degli asset", "アセット名",
-                "에셋 이름", "Nazwy zasobów", "Nomes de assets", "Названия ассетов", "资产名称", "資產名稱");
+                "Asset-Namen", "Asset names", "Nombres de recursos", "Noms des ressources", "Nomi degli elementi", "アセット名",
+                "에셋 이름", "Nazwy zasobów", "Nomes de elementos", "Названия объектов", "资产名称", "資產名稱");
 
             Add(t, "desc.scope.assetNames",
-                "Übersetzt Namen von Gebäuden, Diensten und anderen Assets.",
+                "Übersetzt Namen von Gebäuden, Dienstleistungen und anderen Assets.",
                 "Translates the names of buildings, services and other assets.",
-                "Traduce los nombres de edificios, servicios y otros assets.",
-                "Traduit les noms des bâtiments, services et autres assets.",
-                "Traduce i nomi di edifici, servizi e altri asset.",
+                "Traduce los nombres de edificios, servicios y otros recursos.",
+                "Traduit les noms des bâtiments, services et autres ressources.",
+                "Traduce i nomi di edifici, servizi e altri elementi.",
                 "建物・サービス・その他アセットの名前を翻訳。",
                 "건물·서비스·기타 에셋의 이름을 번역.",
                 "Tłumaczy nazwy budynków, usług i innych zasobów.",
-                "Traduz os nomes de edifícios, serviços e outros assets.",
-                "Переводит названия зданий, служб и других ассетов.",
+                "Traduz os nomes de edifícios, serviços e outros elementos.",
+                "Переводит названия зданий, служб и других объектов.",
                 "翻译资产（建筑、服务等）的名称。",
                 "翻譯資產（建築、服務等）的名稱。");
 
             Add(t, "label.scope.assetDesc",
-                "Asset-Beschreibungen", "Asset descriptions", "Descripciones de assets", "Descriptions d’assets", "Descrizioni degli asset", "アセット説明",
-                "에셋 설명", "Opisy zasobów", "Descrições de assets", "Описания ассетов", "资产描述", "資產描述");
+                "Asset-Beschreibungen", "Asset descriptions", "Descripciones de recursos", "Descriptions des ressources", "Descrizioni degli elementi", "アセット説明",
+                "에셋 설명", "Opisy zasobów", "Descrições de elementos", "Описания объектов", "资产描述", "資產描述");
 
+            // de 那句里的 Dienste 也一并改掉：官方 de 对 Services 一律用 Dienstleistungen（全库 355 处），
+            // 裸 Dienste 只有 1 处且是 "Paradox-Dienste"。
             Add(t, "desc.scope.assetDesc",
-                "Übersetzt den Beschreibungstext unter dem Asset-Titel (ohne Eigenschafts-/Parameter-Namen).",
-                "Translates the description text below the asset title (excludes property/parameter names).",
-                "Traduce el texto descriptivo bajo el título del asset (excluye nombres de propiedades/parámetros).",
-                "Traduit le texte de description sous le titre de l’asset (exclut les noms de propriétés/paramètres).",
-                "Traduce il testo descrittivo sotto il titolo dell’asset (esclude i nomi di proprietà/parametri).",
-                "アセットのタイトル下の説明文を翻訳（属性・パラメータ名は含まない）。",
-                "에셋 제목 아래의 설명 텍스트를 번역(속성/매개변수 이름은 제외).",
-                "Tłumaczy tekst opisu pod tytułem zasobu (bez nazw właściwości/parametrów).",
-                "Traduz o texto de descrição abaixo do título do asset (exclui nomes de propriedades/parâmetros).",
-                "Переводит текст описания под названием ассета (кроме названий свойств/параметров).",
-                "翻译资产标题下方的描述文字（不含属性/参数名）。",
-                "翻譯資產標題下方的描述文字（不含屬性/參數名）。");
+                "Übersetzt den Beschreibungstext unter dem Asset-Namen (ohne Eigenschafts-/Parameter-Namen).",
+                "Translates the description text below the asset name (excludes property/parameter names).",
+                "Traduce el texto descriptivo bajo el nombre del recurso (excluye nombres de propiedades/parámetros).",
+                "Traduit le texte de description sous le nom de la ressource (exclut les noms de propriétés/paramètres).",
+                "Traduce il testo descrittivo sotto il nome dell’elemento (esclude i nomi di proprietà/parametri).",
+                "アセット名の下の説明文を翻訳（プロパティ・パラメーター名は含まない）。",
+                "에셋 이름 아래의 설명 텍스트를 번역(속성/매개변수 이름은 제외).",
+                "Tłumaczy tekst opisu pod nazwą zasobu (bez nazw właściwości/parametrów).",
+                "Traduz o texto de descrição abaixo do nome do elemento (exclui nomes de propriedades/parâmetros).",
+                "Переводит текст описания под названием объекта (кроме названий свойств/параметров).",
+                "翻译资产名称下方的描述文字（不含属性/参数名）。",
+                "翻譯資產名稱下方的描述文字（不含屬性/參數名）。");
 
+            // v1.0.4 术语校对（需求2）：这一档原先英文写 "Game core"、de "Spiel-Kern"、pl "Rdzeń gry"、
+            // ru "Основа игры"、ko "게임 본체" —— 全是直译的「游戏核心」，官方没有这个说法，而且和
+            // 同一个键自己的说明行打架（说明里早就写着 Basisspiel / juego base / gry podstawowej /
+            // базовой игры）。现在统一取官方 ToolOptions.TOOLTIP_TITLE[AssetPack.BaseGame] 那一格
+            // （"Base Game" → Basisspiel / Juego base / Jeu de base / Gioco base / 기본 게임 /
+            //   Gra podstawowa / Jogo-base / Базовая игра）。
+            // ⚠ 简中、繁中、日文【刻意不跟】官方那格（基础版游戏 / 基礎版遊戲 / ベースゲーム）：
+            //   这三种语言里「基础版」读起来是"不含 DLC"，而本档管的是"非其它模组的文字"，DLC 的界面文字
+            //   照样翻。用「游戏本体／遊戲本體／ゲーム本体」才是那个意思，硬对齐官方反而改成错的含义。
+            // 官方 Info Panel 一词也补齐：de Infofenster / es Panel de información / fr Panneau d'informations /
+            // it Pannello informativo / pl Panel informacyjny / pt Painel de informações（凭据
+            // Options.GROUP[Input.SIP]）—— 原本文案只写了「面板/panele」，把"信息"两个字吞了。
+            // 简中「教程」改「教学」：官方 Tutorial 在简中 UI 里出现 55 次全是「教学」，「教程」只有 1 次孤例。
             Add(t, "label.scope.gameCore",
-                "Spiel-Kern", "Game core", "Núcleo del juego", "Cœur du jeu", "Nucleo del gioco", "ゲーム本体",
-                "게임 본체", "Rdzeń gry", "Núcleo do jogo", "Основа игры", "游戏本体", "遊戲本體");
+                "Basisspiel", "Base game", "Juego base", "Jeu de base", "Gioco base", "ゲーム本体",
+                "기본 게임", "Gra podstawowa", "Jogo-base", "Базовая игра", "游戏本体", "遊戲本體");
 
             Add(t, "desc.scope.gameCore",
-                "Übersetzt den restlichen UI-Text des Basisspiels (Menüs, Infopanels, Tutorials usw.).",
+                "Übersetzt den restlichen UI-Text des Basisspiels (Menüs, Infofenster, Tutorials usw.).",
                 "Translates the rest of the base game’s UI text (menus, info panels, tutorials, etc.).",
-                "Traduce el resto del texto de la interfaz del juego base (menús, paneles, tutoriales, etc.).",
-                "Traduit le reste du texte de l’interface du jeu de base (menus, panneaux, tutoriels, etc.).",
-                "Traduce il resto del testo dell’interfaccia del gioco base (menu, pannelli, tutorial, ecc.).",
+                "Traduce el resto del texto de la interfaz del juego base (menús, paneles de información, tutoriales, etc.).",
+                "Traduit le reste du texte de l’interface du jeu de base (menus, panneaux d’information, tutoriels, etc.).",
+                "Traduce il resto del testo dell’interfaccia del gioco base (menu, pannelli informativi, tutorial, ecc.).",
                 "ゲーム本体のその他すべてのUI文字（メニュー・情報パネル・チュートリアル等）を翻訳。",
-                "게임 본체의 나머지 모든 UI 글(메뉴·정보 패널·튜토리얼 등)을 번역.",
-                "Tłumaczy pozostały tekst interfejsu gry podstawowej (menu, panele, samouczki itp.).",
-                "Traduz o resto do texto da interface do jogo base (menus, painéis, tutoriais etc.).",
+                "기본 게임의 나머지 모든 UI 글(메뉴·정보 패널·튜토리얼 등)을 번역.",
+                "Tłumaczy pozostały tekst interfejsu gry podstawowej (menu, panele informacyjne, samouczki itp.).",
+                "Traduz o resto do texto da interface do jogo-base (menus, painéis de informações, tutoriais etc.).",
                 "Переводит остальной текст интерфейса базовой игры (меню, инфопанели, обучения и т.д.).",
-                "翻译游戏本体的其余全部界面文字（菜单、信息面板、教程等）。",
+                "翻译游戏本体的其余全部界面文字（菜单、信息面板、教学等）。",
                 "翻譯遊戲本體的其餘全部介面文字（選單、資訊面板、教學等）。");
 
             // 需求3：「模组名称」去掉「实验性」并提到翻译范围第一排；说明也去掉「实验性功能」开头。
@@ -436,27 +480,27 @@ namespace Cs2AutoTranslator
             AddEnZh(t, "label.scope.modName", "Mod names", "模组名称", "模組名稱");
 
             AddEnZh(t, "desc.scope.modName",
-                "Many mod titles are made-up words or abbreviations, so translating them can look worse than leaving them alone. Off by default.",
+                "Many mod names are made-up words or abbreviations, so translating them can look worse than leaving them alone. Off by default.",
                 "由于模组标题很多都奇奇怪怪，所以不推荐打开。",
                 "由於模組標題很多都奇奇怪怪，所以不推薦打開。");
 
             // 需求3：改名为「游戏世界渲染文本（实验性）」，说明用玩家看得懂的话讲清它管的是 3D 世界里实时渲染的贴地文字。
             AddEnZh(t, "label.scope.worldLabels",
-                "World-rendered text (experimental)", "游戏世界渲染文本（实验性）", "遊戲世界渲染文字（實驗性）");
+                "Text in the game world (experimental)", "游戏世界渲染文本（实验性）", "遊戲世界渲染文字（實驗性）");
 
             // 反馈4：刷新方式三档全部取消（玩家实测前两档看不出区别、第三档每次都卡），改成唯一一种行为，
             // 所以「游戏世界文字显示刷新方式」这个设置项连同它的枚举文案一起删除，原本那段解释全部并进下面这条说明 ——
             // 玩家只要在这一行看懂「什么时候会更新、什么时候会卡一下、翻译没赶上时怎么办」就够了。
             AddEnZh(t, "desc.scope.worldLabels",
                 "Text drawn live inside the 3D game world and kept in the game’s own label cache — road names, district names, what other mods display, and so on.\n"
-                + "How it works: as soon as you switch this on or enter a save, the mod reads the game’s language dictionary and sends off every road / district name in view that has not been translated yet, then forces one refresh when that first batch comes back. Expect one or two light hitches at that moment; after that there is almost no impact on play.\n"
+                + "How it works: as soon as you switch this on or load a save game, the mod reads the game’s language dictionary and sends off every road / district name in view that has not been translated yet, then forces one refresh when that first batch comes back. Expect one or two light hitches at that moment; after that there is almost no impact on play.\n"
                 + "From then on every newly translated name updates by itself. Translation takes time, so if a road or district is finished before its name comes back the translation will not show yet — it appears right after your next interaction, for example moving the mouse over it.",
-                "在3D游戏世界中实时渲染的文本，保存在游戏自己的标签缓存里，比如道路上显示的路名、区名以及其它模组的显示数据等。\n"
-                + "工作方式：启用这一项或进入存档后，模组会立即读取语言字典，把所有还没翻译过的道路／区域名称送去翻译，这批翻译完成后会强制刷新一次。此时可能轻微卡顿 1 到 2 次，之后基本不影响游戏。\n"
-                + "此后每有新的名称翻译完成，都会自动更新。受限于翻译速度，若新名称还没翻译完成时道路／区域就已经放置好了，画面上暂时不会显示译文，但下次操作后就会马上刷新，比如鼠标划过。",
-                "在3D遊戲世界中即時渲染的文字，儲存在遊戲自己的標籤快取裡，比如道路上顯示的路名、區名以及其它模組的顯示資料等。\n"
-                + "運作方式：啟用這一項或進入存檔後，模組會立即讀取語言字典，把所有還沒翻譯過的道路／區域名稱送去翻譯，這批翻譯完成後會強制重新整理一次。此時可能輕微卡頓 1 到 2 次，之後基本不影響遊戲。\n"
-                + "此後每有新的名稱翻譯完成，都會自動更新。受限於翻譯速度，若新名稱還沒翻譯完成時道路／區域就已經放置好了，畫面上暫時不會顯示譯文，但下次操作後就會馬上重新整理，比如滑鼠劃過。");
+                "在3D游戏世界中实时渲染的文本，保存在游戏自己的标签缓存里，比如道路上显示的路名、市辖区名以及其它模组的显示数据等。\n"
+                + "工作方式：启用这一项或进入存档后，模组会立即读取语言字典，把所有还没翻译过的道路／市辖区名称送去翻译，这批翻译完成后会强制刷新一次。此时可能轻微卡顿 1 到 2 次，之后基本不影响游戏。\n"
+                + "此后每有新的名称翻译完成，都会自动更新。受限于翻译速度，若新名称还没翻译完成时道路／市辖区就已经放置好了，画面上暂时不会显示译文，但下次操作后就会马上刷新，比如鼠标划过。",
+                "在3D遊戲世界中即時渲染的文字，儲存在遊戲自己的標籤快取裡，比如道路上顯示的路名、行政區名以及其它模組的顯示資料等。\n"
+                + "運作方式：啟用這一項或進入存檔後，模組會立即讀取語言字典，把所有還沒翻譯過的道路／行政區名稱送去翻譯，這批翻譯完成後會強制重新整理一次。此時可能輕微卡頓 1 到 2 次，之後基本不影響遊戲。\n"
+                + "此後每有新的名稱翻譯完成，都會自動更新。受限於翻譯速度，若新名稱還沒翻譯完成時道路／行政區就已經放置好了，畫面上暫時不會顯示譯文，但下次操作後就會馬上重新整理，比如滑鼠劃過。");
 
             // ===== 选择引擎与测试（需求 1/6/7）=====
             Add(t, "label.test",
@@ -469,7 +513,7 @@ namespace Cs2AutoTranslator
                 "Solo comprueba si el servicio del motor actual es accesible, usando “Hello, world”. NO traduce la interfaz ni cambia ningún texto.",
                 "Vérifie seulement si le service du moteur actuel est joignable, avec « Hello, world ». NE traduit PAS l’interface et ne modifie aucun texte.",
                 "Verifica solo se il servizio del motore attuale è raggiungibile, usando “Hello, world”. NON traduce l’interfaccia né modifica alcun testo.",
-                "「Hello, world」で現在のエンジンサービスに到達できるかだけを確認。界面は翻訳せず、任何文字も変更しません。",
+                "「Hello, world」で現在のエンジンサービスに到達できるかだけを確認。UIは翻訳せず、いかなる文字も変更しません。",
                 "‘Hello, world’로 현재 엔진 서비스에 연결되는지만 확인합니다. 인터페이스를 번역하지 않고 어떤 글도 바꾸지 않습니다.",
                 "Sprawdza tylko, czy obecna usługa silnika jest osiągalna, używając „Hello, world”. NIE tłumaczy interfejsu i nie zmienia żadnego tekstu.",
                 "Apenas verifica se o serviço do motor atual está acessível, usando “Hello, world”. NÃO traduz a interface nem altera nenhum texto.",
@@ -511,8 +555,13 @@ namespace Cs2AutoTranslator
                 "portal.azure.com 建 Translator 资源（F0 免费层、每月 200 万字符）→ 把 key1 粘贴到这里。仅当引擎选微软时才需要。",
                 "portal.azure.com 建 Translator 資源（F0 免費層、每月 200 萬字元）→ 把 key1 貼到這裡。僅當引擎選微軟時才需要。");
 
+            // v1.0.4 术语校对（需求2）：意语这格原先写 "Area Microsoft"，与官方对"区域"的叫法冲突
+            // （游戏里 Area/Aree 是资产编辑器那个「区域」分类，凭据 Editor.ASSET_CATEGORY_TITLE[Areas]），
+            // 而本行指的是 Azure 的地域，官方对 region 的意语写法是 regione（Paradox.COUNTRY_FIELD_LABEL
+            // "Country/Region" → "Paese/regione"），并且与本行其余 11 列（Region/リージョン/지역/Регион）对齐。
+            // 简繁那两格保留「区域」不动：这里说的是微软 Azure 控制台自己的用词，不是游戏内概念。
             Add(t, "label.microsoftRegion",
-                "Microsoft-Region", "Microsoft region", "Región de Microsoft", "Région Microsoft", "Area Microsoft", "Microsoft リージョン",
+                "Microsoft-Region", "Microsoft region", "Región de Microsoft", "Région Microsoft", "Regione Microsoft", "Microsoft リージョン",
                 "Microsoft 지역", "Region Microsoft", "Região da Microsoft", "Регион Microsoft", "微软区域(Region)", "微軟區域(Region)");
 
             Add(t, "desc.microsoftRegion",
@@ -544,8 +593,8 @@ namespace Cs2AutoTranslator
                 "deepl.com → darmowe konto → wklej Auth Key (darmowe klucze kończą się :fx). Potrzebny tylko, gdy silnik to DeepL.",
                 "deepl.com → conta grátis → cole a Auth Key (chaves grátis terminam em :fx). Só é necessário se o motor for DeepL.",
                 "deepl.com → бесплатный аккаунт → вставьте Auth Key (бесплатные ключи оканчиваются на :fx). Нужно только если движок — DeepL.",
-                "deepl.com 注册免费账户 → 把 Auth Key 粘贴到这里（免费 key 通常以 :fx 结尾）。仅当引擎选 DeepL 时才需要。",
-                "deepl.com 註冊免費帳戶 → 把 Auth Key 貼到這裡（免費 key 通常以 :fx 結尾）。僅當引擎選 DeepL 時才需要。");
+                "deepl.com 注册免费账号 → 把 Auth Key 粘贴到这里（免费 key 通常以 :fx 结尾）。仅当引擎选 DeepL 时才需要。",
+                "deepl.com 註冊免費帳號 → 把 Auth Key 貼到這裡（免費 key 通常以 :fx 結尾）。僅當引擎選 DeepL 時才需要。");
 
             Add(t, "label.baiduAppId",
                 "Baidu APP-ID", "Baidu APP ID", "APP ID de Baidu", "APP ID Baidu", "APP ID Baidu", "Baidu APP ID",
@@ -585,9 +634,9 @@ namespace Cs2AutoTranslator
 
             // ===== v0.31 新增引擎的凭据（需求1/2）=====
             // 必填项的「*」由 SettingsLocale 统一拼 label.required，标签正文里不写星号；选填项在括号里写明「选填」。
-            AddEnZh(t, "label.mymemoryEmail", "MyMemory email (optional)", "MyMemory 邮箱（选填）", "MyMemory 信箱（選填）");
+            AddEnZh(t, "label.mymemoryEmail", "MyMemory email address (optional)", "MyMemory 邮箱（选填）", "MyMemory 信箱（選填）");
             AddEnZh(t, "desc.mymemoryEmail",
-                "Optional. Without it the free quota is 5,000 chars/day; a valid email raises it to 50,000 chars/day. Only used when the engine is MyMemory.",
+                "Optional. Without it the free quota is 5,000 chars/day; a valid email address raises it to 50,000 chars/day. Only used when the engine is MyMemory.",
                 "选填。不填是每天 5000 字符，填一个有效邮箱可提到每天 5 万字符。仅当引擎选 MyMemory 时才用得上。",
                 "選填。不填是每天 5000 字元，填一個有效信箱可提到每天 5 萬字元。僅當引擎選 MyMemory 時才用得上。");
 
@@ -611,7 +660,7 @@ namespace Cs2AutoTranslator
 
             AddEnZh(t, "label.openRouterKey", "OpenRouter key", "OpenRouter key", "OpenRouter key");
             AddEnZh(t, "desc.openRouterKey",
-                "openrouter.ai → Keys → paste it here. After clicking “Fetch model list” every model your key can use is listed, with the free ones (names ending in :free) first; as long as you don't pick a paid model nothing is charged. Free models get delisted or run out of upstream capacity from time to time. Only needed when the engine is OpenRouter.",
+                "openrouter.ai → Keys → paste it here. After clicking “Fetch AI model list” every AI model your API key can use is listed, with the free ones (names ending in :free) first; as long as you don't pick a paid model nothing is charged. Free models get delisted or run out of upstream capacity from time to time. Only needed when the engine is OpenRouter.",
                 "openrouter.ai → Keys → 粘贴到这里。点「获取模型列表」后会列出你这个 key 能用的全部模型，免费档（名字以 :free 结尾）排在最前面；只要不选付费模型就不会产生费用。免费档也会被平台下架或挤满，换一个即可。仅当引擎选 OpenRouter 时才需要。",
                 "openrouter.ai → Keys → 貼到這裡。按「取得模型清單」後會列出你這個 key 能用的全部模型，免費檔（名字以 :free 結尾）排在最前面；只要不選付費模型就不會產生費用。免費檔也會被平台下架或擠滿，換一個即可。僅當引擎選 OpenRouter 時才需要。");
 
@@ -619,10 +668,12 @@ namespace Cs2AutoTranslator
             AddEnZh(t, "desc.siliconFlowKey",
                 "cloud.siliconflow.cn → API keys → paste it here. Several nominally free models, and it connects directly in mainland China — but even those are billed against your account balance. Only needed when the engine is SiliconFlow.",
                 "cloud.siliconflow.cn → API 密钥 → 粘贴到这里。有多个标称免费的模型，中国大陆可直连；不过这些模型照样按账户余额扣费，余额为 0 就一直回「余额不足」。仅当引擎选硅基流动时才需要。",
-                "cloud.siliconflow.cn → API 金鑰 → 貼到這裡。有多個標稱免費的模型，中國大陸可直連；不過這些模型照樣按帳戶餘額扣費，餘額為 0 就一直回「餘額不足」。僅當引擎選矽基流動時才需要。");
+                "cloud.siliconflow.cn → API 金鑰 → 貼到這裡。有多個標稱免費的模型，中國大陸可直連；不過這些模型照樣按帳號餘額扣費，餘額為 0 就一直回「餘額不足」。僅當引擎選矽基流動時才需要。");
 
             // Cloudflare Workers AI 要两样：Account ID（定位到你的账号）+ API Token（鉴权）。
-            AddEnZh(t, "label.cloudflareAccount", "Cloudflare Account ID", "Cloudflare 账户 ID", "Cloudflare 帳戶 ID");
+            // v1.0.4 术语校对：Account 的简繁都改成官方用词（简「创建账号」Paradox.REGISTRATION_FROM_LOGIN_LINK、
+            // 繁「帳號」54 处而「帳戶」0 处）；「余额」那一档保留官方简中的写法「账户余额」，见 field.accountid 上方注释。
+            AddEnZh(t, "label.cloudflareAccount", "Cloudflare Account ID", "Cloudflare 账号 ID", "Cloudflare 帳號 ID");
             AddEnZh(t, "desc.cloudflareAccount",
                 "dash.cloudflare.com → the Account ID on the right of the overview page. Only needed when the engine is Cloudflare Workers AI.",
                 "dash.cloudflare.com 概览页右侧的 Account ID。仅当引擎选 Cloudflare Workers AI 时才需要。",
@@ -675,9 +726,9 @@ namespace Cs2AutoTranslator
                 "你在上面所选厂商那边自己的 key，额度与费用按你账号的套餐算。仅当引擎选自定义AI模型时才需要。每家厂商各存一格，互不共用；改动这一家的 key，它已消耗的 token 数就从 0 重新计。",
                 "你在上面所選廠商那邊自己的 key，額度與費用依你帳號的方案算。僅當引擎選自訂AI模型時才需要。每家廠商各存一格，互不共用；改動這一家的 key，它已消耗的 token 數就從 0 重新計。");
 
-            AddEnZh(t, "label.customModelName", "Model name", "模型名称", "模型名稱");
+            AddEnZh(t, "label.customModelName", "AI model name", "模型名称", "模型名稱");
             AddEnZh(t, "desc.customModelName",
-                "The exact model name your endpoint expects, e.g. gpt-4o-mini or a local model’s id. Typed by hand here because a custom address does not always offer a model list to pick from.",
+                "The exact AI model name your endpoint expects, e.g. gpt-4o-mini or a local model’s id. Typed by hand here because a custom address does not always offer an AI model list to pick from.",
                 "对方接口认的模型名，比如 gpt-4o-mini 或本地模型的 id。这里手填是因为自定义地址不一定提供模型列表可选。",
                 "對方介面認得的模型名稱，例如 gpt-4o-mini 或本機模型的 id。這裡手填是因為自訂位址不一定提供模型清單可選。");
 
@@ -691,26 +742,26 @@ namespace Cs2AutoTranslator
                 "模型回答前先想多久，強度越高速度越慢。");
 
             // 「获取模型列表」按钮 + 结果显示行（需求2）。框架一行只放一个控件，所以按钮排在下拉框的上一行。
-            AddEnZh(t, "label.fetchModels", "Fetch model list", "获取模型列表", "取得模型清單");
+            AddEnZh(t, "label.fetchModels", "Fetch AI model list", "获取模型列表", "取得模型清單");
             AddEnZh(t, "desc.fetchModels",
                 "Asks the platform which models your key may use and fills the dropdown below. Runs in the background, so the interface stays usable while it works.",
                 "向平台查询你这个 key 能用哪些模型，取到后填进下面的下拉框。全程后台进行，不会卡住界面。",
                 "向平台查詢你這個 key 能用哪些模型，取得後填進下面的下拉框。全程背景進行，不會卡住介面。");
 
-            AddEnZh(t, "label.fetchModelsStatus", "Model list result", "模型列表获取结果", "模型清單取得結果");
+            AddEnZh(t, "label.fetchModelsStatus", "AI model list result", "模型列表获取结果", "模型清單取得結果");
 
             // 模型下拉框：平台的模型名一直在变，写死一个不靠谱 —— 首项给默认值，其余靠「获取模型列表」现拉。
             // 反馈9：这里不再写「哪几个引擎共用本项」。那是我们的内部实现，玩家既用不上也管不着。
-            AddEnZh(t, "label.aiModel", "Model", "模型", "模型");
+            AddEnZh(t, "label.aiModel", "AI model", "模型", "模型");
             AddEnZh(t, "desc.aiModel",
-                "Which model to translate with. The default is preselected; “Fetch model list” then lists every model your key can use, free ones at the top, and within the free ones the ones that suit UI strings come first. If the top free model keeps failing, just pick another entry marked free.",
+                "Which AI model to translate with. The default is preselected; “Fetch AI model list” then lists every AI model your API key can use, free ones at the top, and within the free ones the ones that suit UI strings come first. If the top free model keeps failing, just pick another entry marked free.",
                 "用哪个模型来翻译。已预选好默认值；点「获取模型列表」会列出你这个 key 能用的全部模型，免费档排在最前面，免费档里又以适合翻界面文字的排在最前。若排在最前面那个免费档一直失败，在下拉框里换一条标着「免费」的即可。",
                 "用哪個模型來翻譯。已預選好預設值；按「取得模型清單」會列出你這個 key 能用的全部模型，免費檔排在最前面，免費檔裡又以適合翻介面文字的排在前面。若排在最前面那個免費檔一直失敗，在下拉框裡換一條標著「免費」的即可。");
 
             // 需求2：需注册的引擎在测试按钮旁边多一个「跳转注册页面」，用系统默认浏览器打开。
-            AddEnZh(t, "label.openRegisterPage", "Open registration page", "跳转注册页面", "前往註冊頁面");
+            AddEnZh(t, "label.openRegisterPage", "Open account creation page", "跳转注册页面", "前往註冊頁面");
             AddEnZh(t, "desc.openRegisterPage",
-                "Opens the current engine’s sign-up / API-key page in your system’s default browser. Hidden for engines that need no registration.",
+                "Opens the current engine’s account-creation / API-key page in your system’s default browser. Hidden for engines that need no registration.",
                 "用系统默认浏览器打开当前引擎的注册／申请 key 页面。免注册的引擎不会显示本按钮。",
                 "用系統預設瀏覽器開啟目前引擎的註冊／申請 key 頁面。免註冊的引擎不會顯示本按鈕。");
 
@@ -724,13 +775,13 @@ namespace Cs2AutoTranslator
                 "로그 폴더 열기", "Otwórz folder dziennika", "Abrir pasta do log", "Открыть папку журнала", "打开日志文件夹", "打開日誌資料夾");
 
             Add(t, "desc.openLogFolder",
-                "Öffnet den Ordner mit dem mod-eigenen Protokoll im Dateimanager — praktisch, um es bei Problemen zu teilen.",
+                "Öffnet den Ordner mit dem Mod-eigenen Protokoll im Dateimanager — praktisch, um es bei Problemen zu teilen.",
                 "Opens the folder containing this mod’s own log in the file manager — handy for sharing it when reporting problems.",
                 "Abre en el explorador la carpeta con el registro propio de este mod, útil para compartirlo al reportar problemas.",
                 "Ouvre dans l’explorateur le dossier contenant le journal propre de ce mod — pratique pour le partager en cas de problème.",
                 "Apre nella gestione file la cartella con il registro di questa mod — utile per condividerlo quando segnali problemi.",
-                "本Mod専用のログがあるフォルダをファイル管理で開きます。問題報告時の共有に便利。",
-                "이 모드 전용 로그가 있는 폴더를 파일 관리자에서 엽니다. 문제 제보 시 공유에便利です.",
+                "本Mod専用のログがあるフォルダをファイルマネージャーで開きます。問題報告時の共有に便利です。",
+                "이 모드 전용 로그가 있는 폴더를 파일 관리자에서 엽니다. 문제 제보 시 공유에 유용합니다.",
                 "Otwiera w menedżerze plików folder z własnym dziennikiem tego moda — przydatne przy zgłaszaniu problemów.",
                 "Abre no gerenciador de arquivos a pasta com o log próprio deste mod — útil para compartilhá-lo ao relatar problemas.",
                 "Открывает в проводнике папку с собственным журналом этого мода — удобно делиться им при сообщении о проблемах.",
@@ -745,15 +796,58 @@ namespace Cs2AutoTranslator
                 "Entfernt nur die Übersetzungsspuren – Einstellungen, Keys und andere Daten bleiben erhalten. Die Oberfläche kehrt vollständig zum Originaltext zurück, und der Hauptschalter „Übersetzung aktivieren“ wird ausgeschaltet, nach einem Neustart wird also nicht automatisch wieder übersetzt – zum Erneuten einfach wieder einschalten.",
                 "Only clears translation traces — it does not delete settings, keys or any other data. The interface fully reverts to the original text, and Enable translation is switched off as well, so nothing starts translating again by itself after a restart. Turn the switch back on whenever you want to translate.",
                 "Solo elimina los rastros de traducción; no borra ajustes, claves ni otros datos. La interfaz vuelve totalmente al texto original y además se apaga «Activar traducción», así que tras reiniciar no se volverá a traducir sola: vuelve a encenderla cuando quieras traducir.",
-                "Supprime uniquement les traces de traduction ; ne supprime ni les réglages, ni les clés, ni d’autres données. L’interface revient entièrement au texte d’origine et « Activer la traduction » est éteint : rien ne se retraduit tout seul après un redémarrage. Rallumez-le quand vous voulez traduire.",
+                "Supprime uniquement les traces de traduction ; ne supprime ni les paramètres, ni les clés, ni d’autres données. L’interface revient entièrement au texte d’origine et « Activer la traduction » est éteint : rien ne se retraduit tout seul après un redémarrage. Rallumez-le quand vous voulez traduire.",
                 "Rimuove solo le tracce di traduzione; non cancella impostazioni, chiavi né altri dati. L’interfaccia torna del tutto al testo originale e «Attiva traduzione» viene spento: dopo il riavvio nulla ricomincia a tradursi da solo. Riaccendilo quando vuoi tradurre.",
-                "翻訳の痕跡のみを消去し、設定項目・Key などのデータは消しません。界面はすべて原文に戻り、「翻訳を有効化」も同時にオフになるため、再起動後に自動で翻訳が始まることはありません。翻訳し直したいときはスイッチを入れ直してください。",
-                "번역 흔적만 지우고 설정 항목, Key 등 데이터는 지우지 않습니다. 인터페이스가 모두 원문으로 돌아가고 '번역 활성화'도 함께 꺼지므로 재시작 후에 자동으로 번역이 시작되지 않습니다. 다시 번역하려면 스위치를 켜면 됩니다.",
+                "翻訳の痕跡のみを消去し、設定項目・キーなどのデータは消しません。UIはすべて原文に戻り、「翻訳を有効化」も同時にオフになるため、再起動後に自動で翻訳が始まることはありません。翻訳し直したいときはスイッチを入れ直してください。",
+                "번역 흔적만 지우고 설정 항목, 키 등 데이터는 지우지 않습니다. 인터페이스가 모두 원문으로 돌아가고 '번역 활성화'도 함께 꺼지므로 재시작 후에 자동으로 번역이 시작되지 않습니다. 다시 번역하려면 스위치를 켜면 됩니다.",
                 "Usuwa wyłącznie ślady tłumaczenia; nie kasuje ustawień, kluczy ani innych danych. Interfejs wraca do oryginalnego tekstu, a „Włącz tłumaczenie” zostaje wyłączone, więc po restarcie nic nie zacznie tłumaczyć się samo. Włącz to z powrotem, gdy chcesz tłumaczyć.",
                 "Remove apenas os vestígios de tradução; não apaga definições, chaves nem outros dados. A interface volta totalmente ao texto original e «Ativar tradução» é desligado, então nada recomeça a traduzir sozinho após reiniciar: ligue de novo quando quiser traduzir.",
                 "Удаляет только следы перевода; настройки, ключи и прочие данные не стираются. Интерфейс целиком возвращается к исходному тексту, а «Включить перевод» выключается, поэтому после перезапуска ничего не начнёт переводиться само: включите обратно, когда снова захотите перевод.",
                 "只清除翻译痕迹，不会清除设置项、Key等数据。界面全部回到原文，同时关掉「启用翻译」总开关，重启游戏后也不会自动开始翻译。想重新翻译，把总开关再打开就行。",
                 "只清除翻譯痕跡，不會清除設定項、Key 等資料。介面全部回到原文，同時關閉「啟用翻譯」總開關，重啟遊戲後也不會自動開始翻譯。想重新翻譯，把總開關再打開就行。");
+
+            // ===== 关于（v1.0.4 需求1）=====
+            // 这六条【全部 12 语手写】，不用 AddEnZh：板块名与按钮名很短、基本不会变，走机翻反而要多打
+            // 九次请求（玩家在意额度），而且要等后台翻完才换成本地文字，开机第一眼看到的是一串英文。
+            //
+            // 用词依据 = 游戏自己的语言包（Cities2_Data\Content\Game\Locale.cok 解出来的 12 份官方词典，
+            // 见工作区 state\official-locale\，本轮术语校对的唯一权威来源）：
+            //   · 板块名取游戏设置页自己那个分节名 Options.SECTION[About]（en "About" / 简「关于」/ 繁「關於」/
+            //     de "Über" / es "Acerca de" / fr "À propos" / it "Informazioni" / ko "정보" / pl "Informacje" /
+            //     pt "Sobre"），玩家在游戏设置左侧见过的词，在模组这一页再见到同一个词。
+            //     只有 ja/ru 两格【没有】照抄：官方那两格是 ゲームについて / Об игре，字面意思是「关于游戏」，
+            //     挂在模组自己的板块上会指错对象，所以按官方对 Mod 的写法改成「このModについて」「О модификации」
+            //     （ru 官方从头到尾不用 "мод" 这个词，见 Paradox.MODS_DISCLAIMER：Модификации）。
+            //   · Mod 的性数按官方对话文案：de "Der Mod"、es "El mod"、fr "Le mod"、it "La mod"、pl "moda"(属格)
+            //     （凭据 Common.DIALOG_MESSAGE_MODDING[*] 五格），所以「XX 版本」一行按各自性数写。
+            //   · ja/ko 的「Mod/모드」与简繁的「模组/模組」逐字等于官方 Menu.MODS_TAB 那一格。
+            //   · 「作者」用名词（de Autor / fr Auteur / ru Автор …）而不是官方素材卡片上的 "Created by"
+            //     （Paradox.MOD_AUTHOR，各语言都是动词短语），因为这一行是「标题: 值」的只读行，
+            //     「创建于」当标题反而读不通。简中「作者」与官方 Paradox.MOD_AUTHOR 的简中译名逐字相同。
+            Add(t, "group.about",
+                "Über", "About", "Acerca de", "À propos", "Informazioni", "このModについて",
+                "정보", "Informacje", "Sobre", "О модификации", "关于", "關於");
+
+            Add(t, "label.modVersion",
+                "Mod-Version", "Mod version", "Versión del mod", "Version du mod", "Versione della mod", "Modバージョン",
+                "모드 버전", "Wersja moda", "Versão do mod", "Версия модификации", "模组版本", "模組版本");
+
+            Add(t, "label.author",
+                "Autor", "Author", "Autor", "Auteur", "Autore", "作者",
+                "작성자", "Autor", "Autor", "Автор", "作者", "作者");
+
+            Add(t, "label.linkKofi",
+                "Spendier mir einen Kaffee", "Buy me a coffee", "Invítame a un café", "Offrez-moi un café", "Offrimi un caffè", "コーヒーをおごる",
+                "커피 한 잔 쏘기", "Postaw mi kawę", "Me pague um café", "Угостите меня кофе", "请我喝杯咖啡", "請我喝杯咖啡");
+
+            // 三个按钮的跳转地址在 ModInfo.cs，一处改完全生效；这里只管显示。
+            Add(t, "label.linkForum",
+                "Forum-Thread", "Forum thread", "Hilo del foro", "Sujet du forum", "Thread sul forum", "フォーラムスレッド",
+                "포럼 게시물", "Wątek na forum", "Tópico no fórum", "Тема на форуме", "论坛页面", "論壇頁面");
+
+            Add(t, "label.linkRainbow",
+                "RAINBOW-Webseite", "RAINBOW website", "Sitio web de RAINBOW", "Site web RAINBOW", "Sito web RAINBOW", "RAINBOW公式サイト",
+                "RAINBOW 공식 사이트", "Strona RAINBOW", "Site do RAINBOW", "Сайт RAINBOW", "RAINBOW官网", "RAINBOW官網");
 
             // 需求7：声明文案由用户直接给定，逐字照抄，不改写不润色。
             // 旧的 label.disclaimer 已无引用（ReadEntries 把 Disclaimer 的标题直接映射到 text.disclaimer 全文），一并删掉。
@@ -933,6 +1027,7 @@ namespace Cs2AutoTranslator
                 { m_Setting.GetOptionGroupLocaleID(TranslatorSetting.kGroupTest), L("group.test") },
                 { m_Setting.GetOptionGroupLocaleID(TranslatorSetting.kGroupHotkeys), L("group.hotkeys") },
                 { m_Setting.GetOptionGroupLocaleID(TranslatorSetting.kGroupLog), L("group.log") },
+                { m_Setting.GetOptionGroupLocaleID(TranslatorSetting.kGroupAbout), L("group.about") },
                 { m_Setting.GetOptionGroupLocaleID(TranslatorSetting.kGroupDisclaimer), L("group.disclaimer") },
 
                 { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.Enabled)), L("label.enabled") },
@@ -1071,6 +1166,15 @@ namespace Cs2AutoTranslator
                 // 需求10：「清除缓存」按钮。
                 { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.ClearCache)), L("label.clearCache") },
                 { m_Setting.GetOptionDescLocaleID(nameof(TranslatorSetting.ClearCache)), L("desc.clearCache") },
+
+                // v1.0.4 需求1：「关于」板块。两行只读值 + 一行三个跳转按钮，标题在这里挂，
+                // 值与地址由 TranslatorSetting 从 ModInfo 取 —— 注册顺序不影响界面顺序（界面按
+                // Setting.cs 的属性声明顺序排），但保持与声明顺序一致，方便对着界面核。
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.ModVersion)), L("label.modVersion") },
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.Author)), L("label.author") },
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.OpenKoFi)), L("label.linkKofi") },
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.OpenForum)), L("label.linkForum") },
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.OpenRainbow)), L("label.linkRainbow") },
 
                 // 需求9：[SettingsUIMultilineText] 不渲染正文，故把免责【全文放进标题】——标题即完整说明，用户能看到内容。
                 { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.Disclaimer)), L("text.disclaimer") },

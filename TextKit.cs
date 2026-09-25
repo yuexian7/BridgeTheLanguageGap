@@ -286,6 +286,49 @@ namespace Cs2AutoTranslator
             return arr == null ? null : ParseFirstJsonString(arr);
         }
 
+        // 数组按下标取元素：返回第 index 个元素的【原样子串】（容器带首尾括号，字符串带首尾引号，标量就是那几个字符）。
+        // 为什么要新加这个口子：现有取值口全是「按 key 找值」，而谷歌网页版 batchexecute 的响应是
+        // 一串【只有位置、没有字段名】的嵌套数组（译文长在 payload[1][0][i][5][j][0]），只能按坐标取。
+        //  json 不是数组、下标越界、结构读不动 —— 一律返回 null，交给调用方判失败；
+        // 绝不「顺手」从别处捡个字符串冒充译文（与 ConcatGtxSegments 同一条铁律）。
+        public static string ArrayElement(string json, int index)
+        {
+            if (string.IsNullOrEmpty(json) || index < 0) return null;
+            int p = 0;
+            while (p < json.Length && IsBlank(json[p])) p++;
+            if (p >= json.Length || json[p] != '[') return null;
+            int i = p + 1, n = 0;
+            while (i < json.Length)
+            {
+                char c = json[i];
+                if (c == ']') return null;                                   // 元素就这些，下标越界
+                if (c == ',' || IsBlank(c)) { i++; continue; }
+                int end = SkipValue(json, i);
+                if (end <= i) return null;                                   // 防呆：走不动立刻收工，绝不原地打转
+                if (n == index) return json.Substring(i, end - i).Trim();
+                n++;
+                i = end;
+            }
+            return null;
+        }
+
+        // 数组元素的原始文本是不是一个字符串字面量（首字符是引号）。语言码、译文、rpcid 都要这样认。
+        public static bool IsStringLiteral(string elementText)
+        {
+            return !string.IsNullOrEmpty(elementText) && elementText[0] == '"';
+        }
+
+        // 字符串字面量 -> 内容（去掉首尾引号并反转义 \n \uXXXX \" 等）。不是字符串字面量返回 null。
+        public static string StringValue(string elementText)
+        {
+            return IsStringLiteral(elementText) ? Unquote(elementText, 1) : null;
+        }
+
+        private static bool IsBlank(char c)
+        {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+        }
+
         // 第一个「值是 {…} 或 […]」的同名 key，返回含首尾括号的完整子串（括号配对，跳过字符串内的括号与转义）。
         public static string FindContainer(string json, string key)
         {

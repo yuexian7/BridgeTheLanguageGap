@@ -870,7 +870,86 @@ namespace Cs2AutoTranslator
                  + "&dt=t&q=" + Uri.EscapeDataString(text ?? "");
         }
 
-        public static string GoogleParse(string resp) => Json.ConcatGtxSegments(resp);
+        public static string GoogleParse(string resp)
+        {
+            // 两种响应形状都认：网页版 batchexecute 的嵌套数组、老通道的 [[["译","原",…]],…]。
+            // 先试网页版，认不出来再落到老形状 —— 两者结构互斥（见 GoogleWebParse 里对 rpcid 的硬校验），
+            // 不存在「拿错形状解出错译文」：认不出来就是 null，由引擎记一条失败。
+            string web = GoogleWebParse(resp);
+            return web ?? Json.ConcatGtxSegments(resp);
+        }
+
+        // ---- 谷歌网页版自己那条通道（2026-09-25 加，实测取证见 state/probe-google3.sh、probe-google4.sh、probe-google5.sh、probe-webclient.ps1）----
+        // 为什么要有第二条：免 key 的 translate_a 端点【整族】被谷歌按出口 IP 关进反爬黑名单 ——
+        // 三个域名 × 六个 client 共 18 个组合：8 个 302 跳 www.google.com/sorry（跟着跳就是那张 429 拦截页）、
+        // gtx 在两个可用域名上直接 429、webapp 两个 403（block page）、translate-pa.googleapis.com 六个 404（根本不提供这条路径）。
+        // v1.0.3 时"换成 dict-chrome-ex 就能用"的那条今天也是 302；再换 chromium / xdesktop / awin / firefox 一样绕不过，
+        // 带上首页 NID cookie 再打、隔 20 秒连试三次都不恢复。
+
+        // 而同一个出口 IP 下 www.google.com/generate_204 只 0.48 秒回 204、网页版首页 200/3MB 正常，
+        // 说明【不是玩家的节点挂了】，也不是「整个谷歌都连不上」，关的只是 translate_a 这一族免 key JSON 端点。
+        // 网页版自己用的 batchexecute 不归那条拦截规则管：同样无 cookie、同样伪装的浏览器 UA，
+        // 连打六次全 200；实测过的形状是 en→zh / auto→zh / ja→zh / zh→en / zh→ru / en→fr / zh→ja，
+        // 原文最长一条【英文 146 字符】（回四段，全部拼回一句），中文 37 字符、日文 20 字符也测过，
+        // 另测过带英文引号、方括号、百分号与换行的原文。没测过的超长文本（几百句那种）不要凭想象断言能过。
+        // 所以把它放在【第一顺位】，translate_a 那套原样留着：别的玩家出口 IP 没被拉黑时它更简单，
+        // 而这条网页接口哪天改版也不至于全军覆没 —— 两条通道任一能用，玩家就不用管。
+        // ⚠ 这条比 translate_a 更「私有」（它是网页前端的内部协议，不是给客户端用的公开端点），
+        //   所以哪天它也开始回空/400，先怀疑【改版】而不是自己的网络；去重抓一份样本再改解析器（样本见 tests\fixtures\samples\google\）。
+
+        public const string GoogleWebUrl = "https://translate.google.com/_/TranslateWebserverUi/data/batchexecute";
+        public const string GoogleWebRpcId = "MkEWBc";     // 网页版翻译框在用的 rpcid，响应里带译文与分句原文
+
+        // 请求体是表单：f.req=<三层嵌套 JSON>，而最内层还要当作【一个字符串】再嵌一次，所以转义有两层。
+        // 内层形状 = [[原文, 源语言, 目标语言, true], [null]]，源语言给 "auto" 就是自动识别。
+        public static string GoogleWebBody(string text, string targetLang, string sourceLang)
+        {
+            string src = string.IsNullOrEmpty(sourceLang) ? "auto" : sourceLang;
+            string inner = "[[\"" + Json.Escape(text ?? "") + "\",\"" + Json.Escape(src)
+                         + "\",\"" + Json.Escape(targetLang ?? "") + "\",true],[null]]";
+            string freq = "[[[\"" + GoogleWebRpcId + "\",\"" + Json.Escape(inner) + "\",null,\"generic\"]]]";
+            return "f.req=" + Uri.EscapeDataString(freq);
+        }
+
+        // 响应形状（去掉 `)]}'` 这个反劫持前缀之后）：
+        //   [ [ "wrb.fr", "MkEWBc", "<内层JSON字符串>", null,null,null,"generic" ], ["di",…], ["af.httprm",…] ]
+        // 内层字符串解开后，译文长在 payload[1][0][i][5][j][0]：i=分句组、j=组内分段。
+        // 长文本会被切成多段，必须【全部拼起来】，只取第一段会静默吞掉后半句（v0.31 在老通道上就踩过这个坑）。
+        public static string GoogleWebParse(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return null;
+            int b = resp.IndexOf('[');                                  // `)]}'` 前缀（也可能没有）之后才是真正的 JSON
+            if (b < 0) return null;
+            string batch = resp.Substring(b);
+            string entry = Json.ArrayElement(batch, 0);
+            if (entry == null) return null;
+            // rpcid 必须正好是 MkEWBc：认错了条目就等于拿别处的字符串冒充译文，宁可返回 null 报失败。
+            if (Json.StringValue(Json.ArrayElement(entry, 1)) != GoogleWebRpcId) return null;
+            string payload = Json.StringValue(Json.ArrayElement(entry, 2));
+            if (string.IsNullOrEmpty(payload)) return null;
+            string groups = Json.ArrayElement(Json.ArrayElement(payload, 1) ?? "", 0);
+            if (groups == null) return null;
+            var sb = new StringBuilder();
+            for (int i = 0; i < MaxSegments; i++)
+            {
+                string grp = Json.ArrayElement(groups, i);
+                if (grp == null) break;                                 // 组取完了
+                string segs = Json.ArrayElement(grp, 5);                // [null,…,分段列表,…] 的第 5 项
+                if (segs == null) continue;
+                for (int k = 0; k < MaxSegments; k++)
+                {
+                    string seg = Json.ArrayElement(segs, k);
+                    if (seg == null) break;
+                    string t = Json.StringValue(Json.ArrayElement(seg, 0));
+                    if (!string.IsNullOrEmpty(t)) sb.Append(t);
+                }
+            }
+            string result = sb.ToString();
+            return result.Length == 0 ? null : result;
+        }
+
+        // 遍历分段用的上限：游戏里一条界面文本切不出几十段，这里只是防「结构异常时循环走不完」的保险丝。
+        private const int MaxSegments = 512;
 
         // ---- DuckDuckGo ----
         // 两步：先 GET /translate 拿 vqd-4 令牌，再带 x-vqd-4 头 POST。令牌是会话级的，拿到后可以复用。

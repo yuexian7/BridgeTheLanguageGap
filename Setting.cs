@@ -21,10 +21,10 @@ namespace Cs2AutoTranslator
     [SettingsUITabOrder(kTabTranslate, kTabEngine, kTabMisc)]
     [SettingsUIGroupOrder(kGroupMain, kGroupTarget, kGroupScope,
                           kGroupEngine, kGroupTest,
-                          kGroupHotkeys, kGroupLog, kGroupDisclaimer)]
+                          kGroupHotkeys, kGroupLog, kGroupAbout, kGroupDisclaimer)]
     [SettingsUIShowGroupName(kGroupMain, kGroupTarget, kGroupScope,
                              kGroupEngine, kGroupTest,
-                             kGroupHotkeys, kGroupLog, kGroupDisclaimer)]
+                             kGroupHotkeys, kGroupLog, kGroupAbout, kGroupDisclaimer)]
     public class TranslatorSetting : ModSetting
     {
         // 需求1：SettingsUISection(tab, group) 的【第一个参数就是标签页 id】（特性构造函数的形参名就叫 tab），
@@ -42,6 +42,7 @@ namespace Cs2AutoTranslator
         public const string kGroupTest = "Test";           // 测试
         public const string kGroupHotkeys = "Hotkeys";     // 快捷键设置（需求6）
         public const string kGroupLog = "Log";             // 日志
+        public const string kGroupAbout = "About";         // 关于（v1.0.4：日志下方，声明上方）
         public const string kGroupDisclaimer = "Disclaimer"; // 声明
 
         public TranslatorSetting(IMod mod) : base(mod) { }
@@ -973,6 +974,55 @@ namespace Cs2AutoTranslator
         [SettingsUIButton]
         [SettingsUISection(kTabMisc, kGroupLog)]
         public bool ClearCache { set { OnClearCacheClicked?.Invoke(); } }
+
+        // ===== 关于（v1.0.4 需求1）=====
+        // 全部走框架原生控件，不写自定义面板：
+        //   版本 / 作者两行 = 只读 string（AutomaticSettings.GetWidgetType：canRead && !canWrite 的 string
+        //     → WidgetType.StringField → Game.UI.Widgets.LocalizedValueField，setter 是空委托，玩家改不了）。
+        //     与上面 LogPath 同一条渲染路径，也和原版 Game.Settings.About 的 gameVersion 同款。
+        //   三个链接 = 只写不读的 bool + 同一个 [SettingsUIButtonGroup]。硬守卫在
+        //     AutomaticSettings.AddBoolButtonProperty:1221 `if (canRead || !canWrite) return null;`
+        //     —— 属性【必须真的没有 getter】，写成 { get; set; } 再加 [SettingsUIButton] 会整行消失。
+        //     同组按钮合并成一行见 GetButtonsGroup:718-733（第一个建 ButtonRow 返回 true，后续并进同一行返回 false）。
+        // 值全部取自 ModInfo，改版本只改那一处；界面顺序 = 属性声明顺序 = 版本 / 作者 / 三个按钮。
+        [SettingsUISection(kTabMisc, kGroupAbout)]
+        public string ModVersion => ModInfo.kVersion;
+
+        [SettingsUISection(kTabMisc, kGroupAbout)]
+        public string Author => ModInfo.kAuthor;
+
+        [SettingsUIButton]
+        [SettingsUIButtonGroup(ModInfo.kLinkGroup)]
+        [SettingsUISection(kTabMisc, kGroupAbout)]
+        public bool OpenKoFi { set => OpenLink(ModInfo.kKoFiUrl, "kofi"); }
+
+        [SettingsUIButton]
+        [SettingsUIButtonGroup(ModInfo.kLinkGroup)]
+        [SettingsUISection(kTabMisc, kGroupAbout)]
+        public bool OpenForum { set => OpenLink(ModInfo.kForumUrl, "forum"); }
+
+        [SettingsUIButton]
+        [SettingsUIButtonGroup(ModInfo.kLinkGroup)]
+        [SettingsUISection(kTabMisc, kGroupAbout)]
+        public bool OpenRainbow { set => OpenLink(ModInfo.kRainbowUrl, "rainbow"); }
+
+        /// <summary>用系统默认浏览器打开链接。走游戏自己的做法：Game.UI.Menu.ParadoxBindings.ShowLink
+        /// 里就是 Application.OpenURL(link)。框架没有超链接控件、描述文字里的 URL 也不可点，所以只能做成按钮。
+        /// 这里【不写 `using UnityEngine;`】—— 见交接文档 §10 第 24 条，那个命名空间会让 Random 变二义(CS0104)，
+        /// 本文件历史上就靠「不导入它」躲开这类冲突，所以整名调用。
+        /// 按钮的 setter 由框架在主线程直接调（§10 第 13 条），OpenURL 也必须在主线程，正好对上。</summary>
+        private static void OpenLink(string url, string tag)
+        {
+            try
+            {
+                UnityEngine.Application.OpenURL(url);
+                ModLog.Info($"[关于] 已请求用系统浏览器打开 {tag}: {url}");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[关于] 打开链接失败 " + tag + ": " + ex.Message);
+            }
+        }
 
         // ===== 声明（需求 9/11）=====
         // [SettingsUIMultilineText] 不渲染正文，故把【全文放进标题】——见 L10n 的 SettingsLocale：

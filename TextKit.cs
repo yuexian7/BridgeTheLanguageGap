@@ -9,9 +9,10 @@ namespace Cs2AutoTranslator
     // 为什么单独一个文件：这四件事全是纯函数，而 Mod.cs 里几乎每个类型都在声明处引用了游戏类型
     // （class Mod : IMod、TranslatorSetting : ModSetting、SettingsLocale : IDictionarySource）。
     // CLR 在【加载类型】时就要解析基类型，所以哪怕方法体 100% 纯，只要它还在 Mod.cs 里就离线调不到。
-    // 搬出来之后 tests\t3 那个 net48 控制台壳可以只编译 Scope.cs + 本文件，一个 <Reference> 都不填，
+    // 搬出来之后 tests\t3 那个 net48 控制台壳可以只编译纯 BCL 那几个文件（现状：Scope.cs + 本文件 +
+    // EngineKit.cs + LanguageCatalog.cs + ModInfo.cs），一个 <Reference> 都不填，
     // 从结构上保证「不启动游戏就能测」，也保证不可能误触真实 Unity 代码。
-    // 回归断言源：D:\qoder md\BridgeTheLanguageGap\tests\fixtures\translate-fixtures.txt
+    // 回归断言源：D:\WorkSpace\CS2MOD\BridgeTheLanguageGap\tests\fixtures\translate-fixtures.txt
 
     // ===== 占位符保护（需求5）=====
     // 机翻有时会把 {VALUE} 之类占位符翻成中文、或凭空加花括号（实证："2026年9月"→"{年}年{月}月"、

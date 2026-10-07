@@ -86,6 +86,30 @@
 		<Error Condition="!Exists('$(HarmonyRuntimeDll)')" Text="找不到 2.3.3 的 0Harmony.dll：$(HarmonyRuntimeDll) —— 本机 NuGet 缓存被清过，联网跑一次 dotnet restore 让 PackageDownload 取回来。不能退回 2.2.2：那会让所有引用 Harmony 2.3.3+ 的模组（如 Write Everywhere）在本模组所在的会话里抛 MissingMethodException。" />
 		<Copy SourceFiles="$(HarmonyRuntimeDll)" DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" SkipUnchangedFiles="false" />
 		<Message Text="SwapHarmonyRuntime: $(OutDir)0Harmony.dll 已换成 2.3.3" Importance="high" />
+
+		<!--
+		  构建完自己收摊。2026-09-30 本机实测（不是推测）：上面那句 Exec 跑的 ModPostProcessor 内部是
+		  Unity.Burst 的 ILHasher，它每次运行都用 Path.GetTempPath() + "cache" + Path.GetRandomFileName()
+		  新建一个缓存根目录，退出时【不回收】。当时 %TEMP% 里攒了 582 个这种目录、31.96 GB（每个 58 MB、
+		  里面 93~94 个 Hashes\<md5>.bhc，文件名与 Unity 自带 BurstCache\JIT\Hashes 逐字节同名）。
+		  清零之后单独跑一次 dotnet build：立刻多出 3 个 × 58 MB ⇒ **一次构建 174 MB**，一天十几趟就是 3~8 GB。
+		  所以每次构建把自己产生的那些删掉。删的范围卡得很死：
+		    · 只在 %TEMP% 顶层；
+		    · 名字必须【严格】等于 cache + 8 位 + '.' + 3 位（正则整串匹配，不是前缀匹配）；
+		    · 目录里必须真的有 Hashes 子目录（Burst 缓存的形状特征），否则不碰；
+		    · 正在被占用的静默跳过，且删除失败绝不让构建失败（ContinueOnError + IgnoreExitCode）。
+		  ⚠ 这一条只关乎【开发机】，与本模组在游戏里干什么无关：运行时代码全部写盘点只有三处
+		    （ModsData\Cs2AutoTranslator\{Cs2AutoTranslator.log, translation.cache} + ModsSettings\Cs2AutoTranslator.json，
+		    2026-09-30 实测合计 1.6 MB），源码里 GetTempPath / GetRandomFileName / BurstCompile 各 0 处
+		    ⇒ 从 Paradox Mods 订阅本模组的玩家根本不跑这条工具链，不会因此少掉空间。
+		  ⚠ 为什么写在本 Target 之内而不是另开一个 AfterTargets=RunModPostProcessor 的 Target：
+		    本文件头部已经实测过"跨 Target 的相对顺序只由提交顺序决定，AfterTargets/BeforeTargets 不做拓扑排序"，
+		    同 Target 内的任务顺序才是硬保证 —— 放在 DeployWIP 之后就有可能排到后处理之前，白跑一次。
+		  想留着缓存（下次构建略快）：dotnet build -p:BurstTempClean=false
+		-->
+		<Exec Condition="'$(OS)' == 'Windows_NT' And '$(BurstTempClean)' != 'false'"
+		      Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$n=0; $b=0; Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter cache*.* | Where-Object { $_.Name -match '^cache[a-z0-9]{8}\.[a-z0-9]{3}$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'Hashes')) } | ForEach-Object { $s=(Get-ChildItem -LiteralPath $_.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Sum Length).Sum; Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue; if (-not (Test-Path -LiteralPath $_.FullName)) { $n++; $b+=$s } }; Write-Output ('BurstTempClean removed ' + $n + ' dirs, ' + [math]::Round($b/1MB,1) + ' MB')&quot;"
+		      ContinueOnError="true" IgnoreExitCode="true" />
 	</Target>
 
 	<!--

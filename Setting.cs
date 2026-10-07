@@ -162,7 +162,7 @@ namespace Cs2AutoTranslator
         // 下拉框顺序 = 这里的枚举声明顺序：完全免注册 → 需注册有免费额度 → 自定义 AI 收尾（需求2）。
         // 枚举按【名字】存盘（见 Mod.cs 的 SettingsStore），所以重排不会让老玩家的配置失效。
         // 默认从微软改成 Google：免 key 开箱可用（2026-09-08：gtx 那个 client 已被 429 拦，改走 dict-chrome-ex，见 FreeApi）。
-        // Yandex 原本在免注册那一段，但它的免 key 网页通道已经死了，现在必须填 IAM token，所以归到需注册段。
+        // Yandex 原本在免注册那一段，但它的免 key 网页通道已经死了，现在必须填 API key，所以归到需注册段。
         public enum Engine
         {
             Google, DuckDuckGo, MyMemory,
@@ -369,7 +369,9 @@ namespace Cs2AutoTranslator
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideMyMemoryEmail))]
         public string MyMemoryEmail { get; set; } = string.Empty;
 
-        // Yandex 免 key 走网页通道即可用；填了 IAM token 改走官方 API（更稳，不受网页会话失效影响）。同样选填。
+        // Yandex：填了 API key 走官方接口（EngineKit.MissingField 已把它列成必填，界面标签带 *）。
+        // 留空不是"没配好"而是"只剩那条已被官方关掉的免 key 网页通道"—— 引擎侧仍让它过（见 YandexEngine.IsConfigured），
+        // 万一哪天网页通道复活就不必改代码；但别把这一格当"选填"宣传，玩家留空的实际结果是一句都翻不出来。
         [SettingsUITextInput]
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideYandexKey))]

@@ -24,7 +24,7 @@
 	  属性形式没法保留它，所以这里写成单行。preflight 把这个字段列为「已知不可完全往返」，
 	  比对时按空白归一化，不当成差异。真在意那个排版就别用本文件改描述，在网页端改。
 	-->
-	<ShortDescription Value="把你看到的统统翻译成你的母语。 Translate everything you see into your native language." />
+	<ShortDescription Value="Translate everything you see into your native language. 把你看到的统统翻译成你的母语。 " />
 	<!--Long description of the mod. Single line or multi line. Supports minimal markdown subset-->
 	<!-- 正文自 2026-09-25 起是【线上当前文本的机械拷贝】（原件快照 state/paradox-live-before-v104.json，
 	     搬运脚本 state/mirror-live-into-xml.mjs）—— 因为作者 2026-09-21 直接在网页端改过三处
@@ -81,9 +81,11 @@ I have also tested BLG with more than a dozen mainstream mods and have not encou
 
 ## Donations
 
-This is my first mod.
+If you find it helpful, would you buy me a coffee? ☕
 
-If you find it helpful, would you buy me a cup of coffee? ☕
+## Browse My Other Mods
+
+[RAINBOW Series](https://rainbow-series-hvpma89wi25.qoder.zone/#top)
 
 # **拯救语言不通**
 
@@ -132,9 +134,11 @@ BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面�
 
 ## 捐赠
 
-这是我的第一个模组。
-
 如果你觉得它对你有所帮助，可以请我喝一杯咖啡吗？☕
+
+## 浏览我的其它模组
+
+[RAINBOW系列](https://rainbow-series-hvpma89wi25.qoder.zone/#top)
 </LongDescription>
 	<!--Thumbnail-->
 	<!--
@@ -185,7 +189,39 @@ BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面�
 	<!-- 2026-09-25：v1.0.4 双语更新日志（中文四条由作者本人给，英文由本地按同一顺序对译）。
 	     ⚠ 注释里不要出现这个元素的尖括号写法：preflight-publish.mjs 用正则在文件里找正文，
 	       会把注释里的开标签当成元素起点，于是读回来的"正文"是这句注释的后半截（v1.0.4 实测踩过）。 -->
-	<ModVersion Value="1.0.4" />
+	<!-- 2026-09-30：本地版本号从 1.0.5 改号为 1.1.0（这一轮实际落地的改动远超一个修订号的分量：下拉框跟随翻译
+		     + 范围类目改判 + 专有名词保护 + 吞吐 + 引擎全线复探 + 构建临时文件自清理）。【这一版仍未发布】——
+		     线上仍是 1.0.4（平台 modVersion 4）。
+		     ⚠ 因此 scripts/preflight-publish.mjs 会比线上多出 ModVersion 这一项差异，那是【预期】的，不代表可以推。
+		     ⚠ 编号规矩（用户 2026-09-30 定）：同一会话内继续改动只加最后一位（1.1.1、1.1.2…），开新会话才加中间那位。
+		     2026-09-30 当晚按这条抬到 1.1.1：用户实机反馈「下拉框依旧没有被翻译」，日志把根因钉在源文本解析层
+		     （模组把显示文字当本地化键名传进来 ⇒ 字典查不到 ⇒ 旧判据整批跳过；而游戏查不到时就把那串 key 原样上屏）。
+		     线上仍是 1.0.4，本次一行线上内容都没碰。
+		     2026-10-01 按同一条规矩抬到 1.1.2（用户三条实机反馈：连不上服务端要能自救、限流不该把文字判死、
+		     语言栏与数值档位栏不该被翻）。
+		     2026-10-02 再抬到 1.1.3（用户四条：部分模组整页含设置项说明仍不翻 = 选项行标题/说明走
+		     NamedWidget 的 IdWithFallback 兜底值、不经取词；性能对照审查；卸载后必须零报错；界面文案挪位）。
+		     2026-10-02 当晚同一会话抬到 1.1.4（用户一条：开启翻译后半天不翻、过一会才开始 —— 凭据是实机
+		     16:00:01 那行「页 56 / 选项行文字 2084 处 / 新入队 46+294」：扫描器把没打开的 55 页也枚举送翻了，
+		     1.4 秒后撞 429、三条线程一起歇 20 秒。现在扫描只看游戏记的活动页，每轮送翻另有 24 条预算，
+		     退避也按前台/世界分档且首次限流只歇 3 秒）。
+		     2026-10-02 当晚同一会话再抬到 1.1.5（用户两条：①目标语言选日语、清了缓存之后模组界面还是日文，
+		     过一小会才变回中文 —— 是不是缓存没清干净？答：缓存清干净了，玩家看见的那句日文不在任何缓存里，
+		     而是【我们写进控件对象】的文字，只有我们的扫描会把它改回来，而 v1.1.4 起那一轮只看当前打开的页：
+		     实机凭据是 20:22:44 清代那一刻日志里一行 [下拉框] 都没有，20:22:47 第一条已经在另一页退还原了，
+		     刚才那一页落进「整页跳过 23 页」再没人管。现在点「清除缓存」/关总开关/按「重新翻译」那一下
+		     会当场走一轮【整棵树】还原；清代时还在网络上的那几条译文一律作废（不再写回内存表与
+		     translation.cache，也不退回刚排空的新队列）；只动选项行的那一类还原从此在日志里留痕。
+		     ②紧接着追问「把所有页上这一档的译文都切回去，对性能影响大不大，不大就改」——
+		     评估结论是不大（一次点击一轮、不是周期活；没写过的槽位只花一次弱表查询 + 判空；零新增请求），
+		     于是补了第二个档位：取消勾选某一档「翻译范围」时，那一档在【所有页】上当场退回原文，
+		     玩家还想留着的那一档一律不动（走真实开关值，所以不会白烧额度重翻），
+		     而这一轮同样一条新活都不排（DropdownKit.MayEnqueue 焊死，免得把 v1.1.4 的收窄顶穿）。
+		     仍然【未发布】，线上依旧 1.0.4。
+		     真要考虑发布这一版时，先按交接文档 §1.2 那四步重抓一遍线上正文再镜像：作者在 2026-09-25 发布后 25 分钟
+		     又在网页端加了「浏览我的其它模组 / RAINBOW Series」两段（长描述 6348→6479 字符、shortDescription 改成
+		     英文在前），本地这份在那两处【至今是落后的】，直接推会把他的话删掉（交接文档 §1.2 末尾那条警告就是为此留的）。 -->
+	<ModVersion Value="1.1.5" />
 	<!--Recommended version of the base game to use the mod-->
 	<!-- 线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1） -->
 	<GameVersion Value="1.6.*" />
@@ -196,20 +232,34 @@ BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面�
 	<!-- 不需要任何 DLC，保持为空 -->
 	<RequiredDLC Value="" />
 	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
+	<!-- v1.1.5 这份双语正文：中文八条由作者 2026-10-03 逐字给（一字未改，含「官方12 种」那个空格），
+	     英文按意思译，格式照 v1.0.4 那份（首行版本号 → 英文条目 → 中文 → 中文条目）。
+	     同一份留了纯文本副本 state/changelog-v115.txt；上一版 v1.0.4 的正文在 releases/v1.0.4/ 的快照里，
+	     平台侧也是按版本各存一条（读回来是 modVersion 2/3/4 各带自己的 details），所以替换这里不会丢历史。
+	     ⚠ 推上去后平台会把「- 」改写成「*   」（三星号三空格），所以 preflight 把这个字段固定判「?」不可比对，
+	     发布后要人工在网页端看一眼版本说明（§1.2 第 4 条经验）。 -->
 	<ChangeLog>
-v1.0.4
+v1.1.5
 
-- Re-checked all 146 pieces of interface text and aligned the wording with the game's official language files.
-- Fixed around 50 inaccurate or inconsistent translations, and filled in text that had been left untranslated in Japanese and Korean.
-- Google Translate now uses the more stable web endpoint first.
-- Added a mod and author information page.
+- Added translation for dropdown option text.
+- Reduced translation usage.
+- Fixed some wording. Proper nouns, such as mod names and platform names, are no longer machine-translated.
+- When the target language is outside the game's 12 official languages, this mod's own settings page is now translated as well.
+- Improved how text is picked up for translation, so fewer lines are left untranslated.
+- For players using a network proxy, the mod now automatically retries over the other route (proxy or direct connection), so a broken proxy setting no longer stops translation.
+- Faster: concurrent network requests increased from 3 to 5, and the UI refresh interval reduced to 0.9 seconds.
+- Uninstalling the mod no longer affects the game in any way.
 
 中文
 
-- 重新检查了 146 条界面文案，按游戏官方语言包统一了用词。
-- 修正了约 50 处不够准确或不够统一的翻译，修复了日语、韩语中漏翻的问题。
-- 现在会优先使用更稳定的谷歌网页翻译通道。
-- 新增模组与作者信息页。
+- 新增对下拉框候选项的文本翻译。
+- 减少了一些翻译的消耗。
+- 修正了部分文字，对于专有名词，比如模组名和平台名不再被硬翻。
+- 目标语言选到游戏官方12 种语言之外时，本模组选项页面现在也会被翻译。
+- 优化了翻译机制，尽量减少部分文本未被翻译的现象。
+- 对于使用网络代理的玩家，模组会自动在走代理和直连之间换一条路重试，以减少因代理出问题而无法翻译。
+- 速度提升：同时进行的网络请求从 3 路增加到 5 路，界面刷新间隔缩短到 0.9 秒。
+- 现在模组卸载不会对游戏有任何影响。
 </ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<!-- 线上三条外链，类型与 URL 都照抄；开源链接同时是兼容性审查里「代码可见」的凭据。

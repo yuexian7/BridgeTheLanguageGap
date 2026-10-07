@@ -13,11 +13,10 @@ namespace Cs2AutoTranslator
     internal static class L10n
     {
         // 列顺序固定：每行 Add(key, …) 必须按这个顺序给 12 个值。
-        internal static readonly string[] Locales =
-        {
-            "de-DE", "en-US", "es-ES", "fr-FR", "it-IT", "ja-JP",
-            "ko-KR", "pl-PL", "pt-BR", "ru-RU", "zh-HANS", "zh-HANT",
-        };
+        // v1.0.5 起这张表不再自己抄一份语言码，而是直接用 LanguageCatalog.OfficialUiLocales ——
+        // 那份清单还有一个用途是「目标语言在这 12 种之内就别机翻我们自己的文案」，两处必须是同一批码，
+        // 各自维护迟早错行（加一列语言、忘改判据 = 某个语言的文案静默不翻）。
+        internal static readonly string[] Locales = LanguageCatalog.OfficialUiLocales;
 
         // key -> (locale -> text)
         private static readonly Dictionary<string, Dictionary<string, string>> Table = Build();
@@ -70,7 +69,7 @@ namespace Cs2AutoTranslator
                 + "Google (MT): no key, fast and accurate — the default\n"
                 + "DuckDuckGo (MT): no key, private, average quality\n"
                 + "MyMemory (MT): no key, average quality, backup only\n"
-                + "Yandex (MT): needs an IAM token\n"
+                + "Yandex (MT): needs an API key\n"
                 + "Microsoft Azure (MT): the most accurate MT, big free quota\n"
                 + "DeepL (MT): the most natural wording\n"
                 + "Baidu (MT): the most stable in mainland China\n"
@@ -88,7 +87,7 @@ namespace Cs2AutoTranslator
                 + "Google（MT）：免key，快而准，默认引擎\n"
                 + "DuckDuckGo（MT）：免key，重隐私，质量一般\n"
                 + "MyMemory（MT）：免key，质量中等，应急备用\n"
-                + "Yandex（MT）：需填IAM令牌\n"
+                + "Yandex（MT）：需填API密钥\n"
                 + "微软Azure（MT）：机翻里最准，免费额度大\n"
                 + "DeepL（MT）：译文最自然\n"
                 + "百度（MT）：大陆最稳，需实名认证\n"
@@ -106,7 +105,7 @@ namespace Cs2AutoTranslator
                 + "Google（MT）：免key，快而準，預設引擎\n"
                 + "DuckDuckGo（MT）：免key，重隱私，品質普通\n"
                 + "MyMemory（MT）：免key，品質中等，應急備用\n"
-                + "Yandex（MT）：需填IAM權杖\n"
+                + "Yandex（MT）：需填API金鑰\n"
                 + "微軟Azure（MT）：機翻裡最準，免費額度大\n"
                 + "DeepL（MT）：譯文最自然\n"
                 + "百度（MT）：大陸最穩，需實名認證\n"
@@ -164,19 +163,19 @@ namespace Cs2AutoTranslator
             //   · "in-game world text" → "text in the game world"（同上，且官方不说 world-rendered 这种复合词）。
             // 简中/繁中的「区域名称」改成官方对 District 的叫法「市辖区名称／行政區名稱」
             //   （凭据 Tutorials.TITLE[DistrictTutorialName] = District Name）。
+            // v1.1.3（用户点名）：原来第三段那一大篇「游戏世界渲染文本」的耗时与花费提醒【挪到那一档自己的说明里】
+            //   —— 总开关的说明不该讲某一个范围开关的细节，玩家是在"游戏世界渲染文本"那一行才需要知道这些。
+            //   末段按用户给的话改写：人工校对、快捷键恢复原文、换引擎各一句。现在只剩三段。
             AddEnZh(t, "desc.enabled",
                 "Please set the language, scope and translation engine first, and only then turn this on.\n"
                 + "Don't worry — turning this off does not clear the translations.\n"
-                + "With text in the game world turned on, loading a large save game for the first time can take a while to translate road names, district names and the like; you are free to keep building while you wait. If you are testing a paid AI translation engine, try not to test it right after loading a save game, because every single test re-translates all of that rendered text and that costs real money (you can also switch this option off while testing).\n"
-                + "How long translation takes depends on how much text the current panel has. If text inside the game comes out partly untranslated, takes too long, or does not show up at all, try turning translation off and back on again (the shortcut is more convenient), or switch to another translation engine.",
+                + "Nobody proofreads these translations, so a wrong choice of words in context is normal. We strongly recommend binding a shortcut to quickly restore the original text whenever you need to check it. Switching translation engine is also worth a try — some of them fit your city better than others.",
                 "请在设置好语言、范围及翻译引擎之后再启用。\n"
                 + "请放心，译文不会在关闭后清除。\n"
-                + "打开游戏世界渲染文本时，第一次加载大城市可能会消耗较多时间翻译道路名、市辖区名称等，你完全可以一边等待一边继续建设你的城市。如果你在测试收费的AI翻译引擎，尽量不要在进入游戏后测试，否则每次测试都会重新翻译这些渲染文本，很费钱的（你也可以关掉这个选项再测试）。\n"
-                + "翻译时间与当前界面的文字数相关。游戏内若出现翻译不全、翻译过久、翻译不显示的情况，尝试关闭翻译再重新启用（快捷键更方便），或切换其它翻译引擎。",
+                + "没有人工校对而出现上下文翻译错误属于正常情况，强烈建议设置快捷键快速恢复原文以方便理解。当然也可以切换翻译引擎，测试哪个最好用。",
                 "請在設定好語言、範圍及翻譯引擎之後再啟用。\n"
                 + "請放心，譯文不會在關閉後清除。\n"
-                + "開啟遊戲世界渲染文字時，第一次載入大城市可能會花費較多時間翻譯道路名、行政區名稱等，你完全可以一邊等待一邊繼續建設你的城市。如果你在測試收費的AI翻譯引擎，盡量不要在進入遊戲後測試，否則每次測試都會重新翻譯這些渲染文字，很花錢的（你也可以關掉這個選項再測試）。\n"
-                + "翻譯時間與目前介面的文字數相關。遊戲內若出現翻譯不全、翻譯過久、翻譯不顯示的情況，嘗試關閉翻譯再重新啟用（快捷鍵更方便），或切換其它翻譯引擎。");
+                + "沒有人工校對而出現上下文翻譯錯誤屬於正常情況，強烈建議設定快捷鍵快速恢復原文以方便理解。當然也可以切換翻譯引擎，測試哪個最好用。");
 
             // ===== 目标语言与保存分组（需求 7：置于翻译范围下方）=====
             Add(t, "group.target",
@@ -212,10 +211,13 @@ namespace Cs2AutoTranslator
                 "免注册免 key，装上就能用。谷歌有两条免 key 通道，本模组会自动轮流试，不用你管。两条都不通就是谷歌在拦你当前的出口 IP，换节点或换引擎才有用。",
                 "免註冊免 key，裝上就能用。谷歌有兩條免 key 通道，本模組會自動輪流試，不用你管。兩條都不通就是谷歌在攔你當前的出口 IP，換節點或換引擎才有用。");
 
+            // 只写玩家用得上的信息（要什么、不通时怎么办、哪几个方向不准）。
+            // ⚠ 别把版本史写进界面：「某日起本模组改走某接口」是我们的提交说明，不是玩家的决策依据 ——
+            //   这类句子还会长，会把这一格挤到换行。改版经过记在 EngineKit.cs 的 FreeApi.DuckDuckGo* 注释里。
             AddEnZh(t, "notes.duckduckgo",
-                "No account and no API key. As of 2026-09 its key-free endpoint rejects this mod's requests, which may vary by region or network — if it fails, switch to Google.",
-                "免注册免 key。2026-09 实测它的免 key 通道会拒绝本模组的请求，可能因地区或网络而异；不通就换 Google。",
-                "免註冊免 key。2026-09 實測它的免 key 通道會拒絕本模組的請求，可能因地區或網路而異；不通就換 Google。");
+                "No account and no API key — works right away. It runs on the same free endpoint DuckDuckGo's own search page uses, so it can change or stop without warning; if it fails, switch to Google. Like Google, it usually needs a proxy from mainland China. Japanese source text translates poorly; other languages are fine. Strings over 1000 characters are skipped.",
+                "免注册免 key，装上就能用。走的是 DuckDuckGo 自己搜索页也在用的那个免费接口，所以它随时可能变动或失效，不通就换 Google。和谷歌一样，中国大陆通常还需要代理。日文原文翻得不准，其它语言可用。超过 1000 字符的长句会被跳过。",
+                "免註冊免 key，裝上就能用。走的是 DuckDuckGo 自己搜尋頁也在用的那個免費介面，所以它隨時可能變動或失效，不通就換 Google。和谷歌一樣，中國大陸通常還需要代理。日文原文翻得不準，其它語言可用。超過 1000 字元的長句會被跳過。");
 
             AddEnZh(t, "notes.mymemory",
                 "5,000 text characters a day without an API key, or 50,000 a day if you optionally add an email address. Average quality — best kept as an emergency backup.",
@@ -223,9 +225,9 @@ namespace Cs2AutoTranslator
                 "不填信箱每天 5000 字元，選填信箱提到每天 5 萬字元。品質中等，適合當應急備用。");
 
             AddEnZh(t, "notes.yandex",
-                "Yandex has shut down its keyless web channel, so an IAM token is now required.",
-                "Yandex 已经关掉了免 key 的网页通道，现在必须填 IAM 令牌才能用；中国大陆通常还需代理。",
-                "Yandex 已經關掉了免 key 的網頁通道，現在必須填 IAM 權杖才能用。");
+                "Yandex has shut down its keyless web channel, so an API key is now required.",
+                "Yandex 已经关掉了免 key 的网页通道，现在必须填 API 密钥才能用；中国大陆通常还需代理。",
+                "Yandex 已經關掉了免 key 的網頁通道，現在必須填 API 金鑰才能用。");
 
             AddEnZh(t, "notes.microsoft",
                 "Free F0 tier: 2 million text characters a month, the most accurate machine translation overall. After creating the Translator resource the region must match; leave it empty for a Global resource.",
@@ -491,16 +493,21 @@ namespace Cs2AutoTranslator
             // 反馈4：刷新方式三档全部取消（玩家实测前两档看不出区别、第三档每次都卡），改成唯一一种行为，
             // 所以「游戏世界文字显示刷新方式」这个设置项连同它的枚举文案一起删除，原本那段解释全部并进下面这条说明 ——
             // 玩家只要在这一行看懂「什么时候会更新、什么时候会卡一下、翻译没赶上时怎么办」就够了。
+            // v1.1.3（用户点名）：总开关说明里那一大段【耗时与花费】的提醒挪到这里 —— 它讲的是这一档自己的代价，
+            // 玩家做决定也正是在这一行做的。三段重新分工：① 这是什么 ② 什么时候干活、会不会卡 ③ 要花多久、
+            // 用收费引擎时怎么省钱。原来那句"每次测试都会重新翻译这些渲染文本"删掉了：
+            // 「测试引擎连通性」那颗探针只发一句固定文本（Mod.cs 的 RunTest），不重翻世界文字，
+            // 留着它反而会把玩家吓得不来测引擎。
             AddEnZh(t, "desc.scope.worldLabels",
                 "Text drawn live inside the 3D game world and kept in the game’s own label cache — road names, district names, what other mods display, and so on.\n"
-                + "How it works: as soon as you switch this on or load a save game, the mod reads the game’s language dictionary and sends off every road / district name in view that has not been translated yet, then forces one refresh when that first batch comes back. Expect one or two light hitches at that moment; after that there is almost no impact on play.\n"
-                + "From then on every newly translated name updates by itself. Translation takes time, so if a road or district is finished before its name comes back the translation will not show yet — it appears right after your next interaction, for example moving the mouse over it.",
+                + "How it works: as soon as you switch this on or load a save game, the mod reads the game’s language dictionary and sends off every road / district name in view that has not been translated yet, then forces one refresh when that first batch comes back. Expect one or two light hitches at that moment; after that there is almost no impact on play. Every name that gets translated later updates by itself — if you finish a road before its name comes back, the translation shows up on your next interaction, for example moving the mouse over it.\n"
+                + "What it costs: this is the whole city’s ground labels, so it is a lot more text than any panel. A big save game can take a while on the first pass — keep building while you wait. With a paid AI engine, turning this off while you try engines out is the cheapest option.",
                 "在3D游戏世界中实时渲染的文本，保存在游戏自己的标签缓存里，比如道路上显示的路名、市辖区名以及其它模组的显示数据等。\n"
-                + "工作方式：启用这一项或进入存档后，模组会立即读取语言字典，把所有还没翻译过的道路／市辖区名称送去翻译，这批翻译完成后会强制刷新一次。此时可能轻微卡顿 1 到 2 次，之后基本不影响游戏。\n"
-                + "此后每有新的名称翻译完成，都会自动更新。受限于翻译速度，若新名称还没翻译完成时道路／市辖区就已经放置好了，画面上暂时不会显示译文，但下次操作后就会马上刷新，比如鼠标划过。",
+                + "工作方式：启用这一项或进入存档后，模组会立即读取语言字典，把视野里还没翻译过的道路／市辖区名称一次送去翻译，这批翻完后强制刷新一次。此时可能轻微卡顿 1 到 2 次，之后基本不影响游戏；再往后每有新名字翻好都会自动更新——如果道路建好了而名字还没翻完，画面上暂时是原文，你下次操作（比如鼠标划过）时就刷出来了。\n"
+                + "耗时与花费：这一档翻的是整座城市的贴地文字，文字量比任何面板都大，大城市存档第一次翻完可能要一段时间，你可以一边等一边继续建设。用收费 AI 引擎时，试引擎阶段先把这一项关掉更省钱。",
                 "在3D遊戲世界中即時渲染的文字，儲存在遊戲自己的標籤快取裡，比如道路上顯示的路名、行政區名以及其它模組的顯示資料等。\n"
-                + "運作方式：啟用這一項或進入存檔後，模組會立即讀取語言字典，把所有還沒翻譯過的道路／行政區名稱送去翻譯，這批翻譯完成後會強制重新整理一次。此時可能輕微卡頓 1 到 2 次，之後基本不影響遊戲。\n"
-                + "此後每有新的名稱翻譯完成，都會自動更新。受限於翻譯速度，若新名稱還沒翻譯完成時道路／行政區就已經放置好了，畫面上暫時不會顯示譯文，但下次操作後就會馬上重新整理，比如滑鼠劃過。");
+                + "運作方式：啟用這一項或進入存檔後，模組會立即讀取語言字典，把視野裡還沒翻譯過的道路／行政區名稱一次送去翻譯，這批翻完後強制重新整理一次。此時可能輕微卡頓 1 到 2 次，之後基本不影響遊戲；再往後每有新的名稱翻好都會自動更新——如果道路蓋好了而名稱還沒翻完，畫面上暫時是原文，你下次操作（比如滑鼠劃過）時就刷出來了。\n"
+                + "耗時與花費：這一檔翻的是整座城市的貼地文字，文字量比任何面板都大，大城市存檔第一次翻完可能要一段的時間，你可以一邊等一邊繼續建設。用收費 AI 引擎時，試引擎的階段先把這一項關掉更省錢。");
 
             // ===== 选择引擎与测试（需求 1/6/7）=====
             Add(t, "label.test",
@@ -640,11 +647,11 @@ namespace Cs2AutoTranslator
                 "选填。不填是每天 5000 字符，填一个有效邮箱可提到每天 5 万字符。仅当引擎选 MyMemory 时才用得上。",
                 "選填。不填是每天 5000 字元，填一個有效信箱可提到每天 5 萬字元。僅當引擎選 MyMemory 時才用得上。");
 
-            AddEnZh(t, "label.yandexKey", "Yandex IAM token", "Yandex IAM 令牌", "Yandex IAM 權杖");
+            AddEnZh(t, "label.yandexKey", "Yandex API key", "Yandex API 密钥", "Yandex API 金鑰");
             AddEnZh(t, "desc.yandexKey",
-                "console.cloud.yandex.ru → create an IAM token → paste it here. Yandex has shut down its keyless web channel, so a token is now required. Only used when the engine is Yandex.",
-                "console.cloud.yandex.ru 建 IAM 令牌 → 粘贴到这里。Yandex 已经关掉了免 key 的网页通道，所以现在必须填令牌才用得了。仅当引擎选 Yandex 时才需要。",
-                "console.cloud.yandex.ru 建 IAM 權杖 → 貼到這裡。Yandex 已經關掉了免 key 的網頁通道，所以現在必須填權杖才用得了。僅當引擎選 Yandex 時才需要。");
+                "console.yandex.cloud → API keys → create one for the Translate service → paste it here. Yandex has shut down its keyless web channel, so a key is now required. Only used when the engine is Yandex.",
+                "console.yandex.cloud → API 密钥 → 为「翻译（Translate）」服务建一把 → 粘贴到这里。Yandex 已经关掉了免 key 的网页通道，所以现在必须填 API 密钥才用得了。仅当引擎选 Yandex 时才需要。",
+                "console.yandex.cloud → API 金鑰 → 為「翻譯（Translate）」服務建一把 → 貼到這裡。Yandex 已經關掉了免 key 的網頁通道，所以現在必須填 API 金鑰才用得了。僅當引擎選 Yandex 時才需要。");
 
             AddEnZh(t, "label.geminiKey", "Google Gemini key", "Google Gemini key", "Google Gemini key");
             AddEnZh(t, "desc.geminiKey",
@@ -941,6 +948,12 @@ namespace Cs2AutoTranslator
             }
 
             int count = 0, fromCache = 0;
+            // v1.1.5：出发时抄一张清代代际戳。这一圈要跑几十条请求（缺多少键跑多少条，最坏几十条 × 每条一次往返），
+            // 中间玩家随时可能点「清除缓存」——那时刚删掉的 translation.cache 不该被这一圈重新写出来
+            //（旧写法会的：Put 在后面无条件执行，末尾还跟着一次整表 Save）。
+            // 只拦【写盘】这一边：内存里已经拿到的译文照旧喂给界面，那是玩家此刻正看着的文字。
+            int stamp = TranslationCache.ClearStamp;
+            bool cleared = false;
             // 只翻【缺】的那些键：官方语言通常就是 v0.31 新增的几十条，非官方语言才等于全表。
             foreach (string key in MissingKeys(locale))
             {
@@ -953,15 +966,20 @@ namespace Cs2AutoTranslator
                     try { val = engine.Translate(setting, en, "auto", locale); }
                     catch (Exception ex) { ModLog.Error("[自翻] 翻译键失败 " + key + ": " + ex.Message); val = null; }
                     if (string.IsNullOrEmpty(val)) val = en; // 失败兜底英文
-                    else TranslationCache.Put(CacheEngine, en, locale, val);
+                    else if (EngineKit.ResultStillWanted(stamp, TranslationCache.ClearStamp))
+                        TranslationCache.Put(CacheEngine, en, locale, val);
+                    else cleared = true;                      // 清代之后翻出来的那些只用于本局，不再写回缓存
                     count++;
                     Thread.Sleep(80); // 轻微节流
                 }
 
                 lock (Machine) { _machineLocale = locale; Machine[key] = val; }
             }
-            TranslationCache.Save();
-            ModLog.Info($"[自翻] 本模组界面文字已机翻到 {locale}：新翻 {count} 条、命中缓存 {fromCache} 条。");
+            // 整表重写等价于"按内存表重建文件"：清代之后内存表是空的，只有这一圈新写的条目才在里面，
+            // 所以被清过就干脆不重写，免得把一个刚被玩家删掉的文件又建出来。
+            if (!cleared) TranslationCache.Save();
+            ModLog.Info($"[自翻] 本模组界面文字已机翻到 {locale}：新翻 {count} 条、命中缓存 {fromCache} 条"
+                        + (cleared ? "（中途清除过缓存：本圈结果只用于当前界面，没有写回缓存文件）" : "") + "。");
 
             // 翻好后刷新一次选项界面，让本模组文字立即变成该语言。
             try { Colossal.Core.MainThreadDispatcher.RunOnMainThread(Patches.RefreshVisibleText); } catch { }

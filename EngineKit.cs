@@ -30,26 +30,32 @@ namespace Cs2AutoTranslator
 
         // 不需要注册即可用的引擎：显示名后面加「直接使用」。
         // Yandex 原本在这一档，但它的免 key 网页通道已被官方关闭（详见 FreeApi.YandexHome 的注释），
-        // 现在必须填 IAM token，所以移到「需注册」档，否则会骗玩家选一个注定失败的选项。
+        // 现在必须填 API key，所以移到「需注册」档，否则会骗玩家选一个注定失败的选项。
         public static bool IsNoSignup(string engineName)
         {
             return engineName == "Google" || engineName == "DuckDuckGo" || engineName == "MyMemory";
         }
 
         // 「跳转注册页面」按钮只对【需要注册】的引擎显示；免注册的和自定义 AI 都不显示（需求2）。
+        // 2026-09-27 逐条重探过一遍跳转（证据：交接工作区 state\engine-audit-2026-09-27\，本机实测那一列在
+        // out/manifest.tsv）：只有 DeepL 与 Yandex 两家改了地方，其余七条仍直达取 key 的页面。
+        //   · DeepL 的 /pro-api 现在两跳到 /en/pro 营销页，玩家进去还得自己找 API Keys 那栏；
+        //     改成账号里的 keys 页（实测 301→/en/your-account/keys→200，未登录会先回登录页，这是应该的）。
+        //   · Yandex 的控制台域名整族搬迁：老域名 console.cloud.yandex.ru 现在 308→console.yandex.cloud，
+        //     产品文档 301→aistudio.yandex.ru（翻译已并入 AI Studio）。用新域名，别让玩家跟着三跳。
         public static string RegisterUrl(string engineName)
         {
             switch (engineName)
             {
                 case "Microsoft": return "https://portal.azure.com/#create/Microsoft.CognitiveServicesTranslator";
-                case "DeepL": return "https://www.deepl.com/pro-api";
+                case "DeepL": return "https://www.deepl.com/your-account/keys";
                 case "Baidu": return "https://api.fanyi.baidu.com/product/11";
                 case "Gemini": return "https://aistudio.google.com/app/apikey";
                 case "Groq": return "https://console.groq.com/keys";
                 case "OpenRouter": return "https://openrouter.ai/settings/keys";
                 case "SiliconFlow": return "https://cloud.siliconflow.cn/account/ak";
                 case "Cloudflare": return "https://dash.cloudflare.com/profile/api-tokens";
-                case "Yandex": return "https://console.cloud.yandex.ru/";
+                case "Yandex": return "https://console.yandex.cloud/";
                 default: return null;   // 免注册引擎与 Custom：没有注册页
             }
         }
@@ -101,7 +107,7 @@ namespace Cs2AutoTranslator
         // 散写了就脱离离线断言，而「选了 A 引擎却露出 B 引擎的 key 框」纯粹是查表错，壳里 3 秒能抓。
 
         // 「跳转注册页面」按钮：只对【需要注册】的引擎显示。
-        // Yandex 现在也在这一档（免 key 网页通道已死），按钮指向 Yandex Cloud 控制台去申请 IAM token。
+        // Yandex 现在也在这一档（免 key 网页通道已死），按钮指向 Yandex Cloud 控制台去申请 API key。
         public static bool ShowRegister(string engineName)
         {
             return !IsNoSignup(engineName) && RegisterUrl(engineName) != null;
@@ -123,7 +129,7 @@ namespace Cs2AutoTranslator
                 case "second": return engineName == "Baidu";       // 百度是 APP ID + 密钥
                 case "key":
                     // 只有 Google / DuckDuckGo / MyMemory 完全不用填 key（MyMemory 那个框是 email，走上面的分支）。
-                    // Yandex 的 IAM token 选填，框照样显示。
+                    // Yandex 的 API key 选填，框照样显示。
                     return engineName != "Google" && engineName != "DuckDuckGo" && engineName != "MyMemory";
                 default: return false;
             }
@@ -206,6 +212,10 @@ namespace Cs2AutoTranslator
         // 免费模型都不能用」。热门的不只是模型名，而是整条 google Gemma 通道，所以默认值要【离开这一家】。
         // ⚠ 不变式：默认值 = FreeFirst(OpenRouter, 当日免费列表) 的队首。改判据时必须跟着改这一格，
         // 否则「获取模型列表」自动改用第一项时会把玩家从默认档悄悄换到另一条。
+        // 2026-09-27 复核（未用作者 key，只读公开列表）：OpenRouter /api/v1/models 免 key 可得 458 条、其中 17 条 :free，
+        // 按现在的 FreeModelPenalty 算队首【仍是】nvidia/nemotron-3.5-lightning:free ⇒ 不变式没破。
+        // Groq 与 SiliconFlow 这两格【没能】核实：两家的 /models 都要 key（实测 401），所以别照着
+        // "列表里查不到就是下架了"下结论 —— 只能等平台改公开列表，或玩家实机报上来。
         public static string HostedModel(string engineName)
         {
             switch (engineName)
@@ -223,6 +233,8 @@ namespace Cs2AutoTranslator
         // Groq 的 API 目前整个走免费额度，只有速率限制；
         // 硅基流动什么都不标，只能维护下面这张已知免费表 —— 它【会过时】，平台改免费档时改这一处。
         // 判断错的代价不对称：漏判只是没筛（全量列出），误判才会把付费模型当免费的给玩家，所以这张表宁短勿长。
+        // ⚠ 2026-09-27 想复核但复不了：硅基流动的 /models 要 key（实测 401），本轮按规矩没动用作者的 key
+        //   ⇒ 下面这六条仍是更早的实测值，别当"今天还免费"的事实引用；玩家报 402 就是这张表该更新了。
         public static readonly string[] SiliconFlowFree =
         {
             "Qwen/Qwen2.5-7B-Instruct",
@@ -268,6 +280,7 @@ namespace Cs2AutoTranslator
         // 实机证明跑不通的档（2026-09-11 玩家实测：列表里 google 那两条 Gemma 免费档都不能用；
         // 上一轮日志里 31b 一直是 429）。这里只【降权】不删除 —— 平台哪天产能回来了不必改代码，
         // 玩家想手动试也照样试得到。判据是实测，不是平台文档，所以别拿它当永久事实。
+        // 2026-09-27 复核：这两条【仍在】OpenRouter 的公开列表里（能列出来 ≠ 跑得通），维持降权不变。
         public static readonly string[] SaturatedFree =
         {
             "google/gemma-4-31b-it:free",
@@ -314,16 +327,60 @@ namespace Cs2AutoTranslator
             => status == 401 || status == 402 || status == 403 || status == 404;
 
         // 状态码 → 给玩家/日志看的人话。返回 null = 这个码没有更具体的说法（沿用通用文案）。
+        // 401 与 403 从 v1.0.5 起【分开写】，因为 2026-09-27 那轮逐家空跑（未用作者 key，见
+        // state\engine-audit-2026-09-27\）暴露出 403 混着两种完全不同的原因：
+        //   · 鉴权类：key 有效但没订阅/没权限（Azure、Cloudflare 都是这个形状）；
+        //   · 地区类：OpenAI 对部分地区直接回 403 unsupported_country_region_territory，
+        //     这时候换 key、换模型都没用，玩家照"key 不对"去排查只会白绕一圈。
+        // 两个码在 IsPermanentStatus 里仍是同一档（多试一次都只是白烧请求），改的只是给人看的那句。
         public static string DescribeStatus(int status)
         {
             switch (status)
             {
-                case 401: case 403: return "key 不对，或这个 key 没有调用该模型的权限";
+                case 401: return "key 不对（打错、过期、或填成了别家的 key）";
+                case 403: return "key 被拒：可能是没这个权限／没开通该服务，也可能是该服务不向你所在的地区开放（OpenAI 对部分地区回的就是这一条，换 key 没用）";
                 case 402: return "账户余额不足（硅基流动标称免费的模型也要账户里有余额才跑得动）";
                 case 404: return "模型已下架，或这个模型其实没有免费档";
                 case 429: return "请求太频繁被平台限流（免费档最容易撞上）";
                 default: return null;
             }
+        }
+
+        // ===== 撞限流之后该歇多久（v1.1.4，纯函数，离线断言直接钉）=====
+        // 旧写法不分第几次，一撞就是 20 秒，而且是【所有线程一起】。实机凭据（2026-10-02 16:00:02→16:00:23）：
+        // 玩家刚点开翻译总开关，10 条请求之内撞了一次速率级别的 429，三条线程一起歇 20 秒 ⇒
+        // 玩家眼睛里就是「开启翻译后很久都没翻译，过了一会才开始正常翻译」（16:00:23 之后一路正常翻了 400 多条，
+        // 说明那根本不是额度用尽，就是一次正常的瞬时限流）。
+        // 梯子：第 1 次 3 秒 → 6 秒 → 10 秒 → 封顶。真被额度卡死时四下打完一共只多花 19 秒，
+        // 而瞬时限流从 20 秒降到 3 秒 —— 这笔账对免费档玩家明显划算。
+        // streak<=0 当第一次处理；capMs<=0 时按默认封顶 20000，免得调用方传错把退避压成 0（那就是无限重撞）。
+        public static int RateLimitCooldownMs(int streak, int capMs)
+        {
+            if (capMs <= 0) capMs = 20000;
+            int ms;
+            switch (streak <= 0 ? 1 : streak)
+            {
+                case 1: ms = 3000; break;
+                case 2: ms = 6000; break;
+                case 3: ms = 10000; break;
+                default: ms = 20000; break;
+            }
+            return ms > capMs ? capMs : ms;
+        }
+
+        // ===== 清代之后，路上那条请求的结果还要不要（v1.1.5，纯函数，离线断言直接钉）=====
+        // 场景：玩家点「清除缓存」那一刻，队列里已经空了，但【几条请求还在网上跑】。它们过 0.1~8 秒才回来，
+        // 而落地那一步做的是 `Translated[src]=tr` + `TranslationCache.Put(...)` —— 于是刚被清空的内存表
+        // 被填回去几条，【刚被删掉的 translation.cache 文件也被重新写出来】。
+        // 玩家看到的正是「缓存没清干净」：清完之后文字还在，或者下次进存档又是一屏旧译文。
+        // 旧写法只防了另一种情况（`TranslatorSetting.Instance?.TargetLocale != target`：请求期间换了目标语言），
+        // 没有"我出发之后缓存被清过"这一格 ⇒ 清代期间出去的那几条照样回写。
+        // 代际戳就是这一格：出发时抄一份 clearStamp，回来时不相等 ⇒ 这条结果作废
+        //（不写内存表、不写磁盘、也不退回队列 —— 退回队列同样是在往【刚清空的新队列】里塞旧活，
+        //  而且 WorldSources 已经清空，路名会被错认成界面文字挤进前台那一队）。
+        public static bool ResultStillWanted(int requestStamp, int clearStamp)
+        {
+            return requestStamp == clearStamp;
         }
 
         // ===== 三个统一分发入口 =====
@@ -516,12 +573,20 @@ namespace Cs2AutoTranslator
         }
 
         // DuckDuckGo：简繁用 zh-Hans / zh-Hant（注意大小写是 ans/ant），其余吃 ISO 639-1。
+        // 下面三条特例是 2026-09-27 逐个 to= 码实测出来的（43 个本模组会发出的码，38 个 200、5 个 400 invalid_to）：
+        //   · fil 老代码映射成 tl —— tl 恰好是被拒的那个，fil 才是收的那个，方向写反了；
+        //   · no 被拒，nb 收（挪威书面语），而 LanguageCatalog 里存的码是 no ⇒ 在这里换；
+        //   · sr 被拒，sr-Cyrl / sr-Latn 收（它按书写系统分档，不按裸语种）。
+        // 目录里 gl（加利西亚语）与 la（拉丁语）它【真的不支持】，没有可换的写法：这两档玩家选了就是翻不出来，
+        // 走的是"每条试三次然后判死、界面保留原文"那条既有的安全路径，不会卡住队列。
         public static string DuckDuckGo(string locale)
         {
             string n = Norm(locale);
             if (n == "zh-hans" || n == "zh-cn") return "zh-Hans";
             if (n == "zh-hant" || n == "zh-tw") return "zh-Hant";
-            if (n == "fil") return "tl";
+            if (n == "fil" || n == "tl" || n == "tl-ph") return "fil";
+            if (n == "no" || n == "nn") return "nb";
+            if (n == "sr") return "sr-Cyrl";
             return Base(locale);
         }
 
@@ -896,6 +961,10 @@ namespace Cs2AutoTranslator
         // 而这条网页接口哪天改版也不至于全军覆没 —— 两条通道任一能用，玩家就不用管。
         // ⚠ 这条比 translate_a 更「私有」（它是网页前端的内部协议，不是给客户端用的公开端点），
         //   所以哪天它也开始回空/400，先怀疑【改版】而不是自己的网络；去重抓一份样本再改解析器（样本见 tests\fixtures\samples\google\）。
+        // 2026-09-27 例行动复探（state\engine-audit-2026-09-27\out\，全部未鉴权）：batchexecute 走代理仍 **200 / 0.46 秒**，
+        // 响应逐字节还是老结构（`)]}'` 前缀 + ["wrb.fr","MkEWBc",<内层>…]，译文在 payload[1][0][i][5][j][0]），
+        // GoogleWebParse 的 rpcid 硬校验与分段拼接【不需要动】；translate_a 那族同一出口 IP 依旧 429（sorry 页），
+        // 与 v1.0.4 的判断一致 —— 两个端点的相对位置没变，别去调换顺位。
 
         public const string GoogleWebUrl = "https://translate.google.com/_/TranslateWebserverUi/data/batchexecute";
         public const string GoogleWebRpcId = "MkEWBc";     // 网页版翻译框在用的 rpcid，响应里带译文与分句原文
@@ -952,42 +1021,82 @@ namespace Cs2AutoTranslator
         private const int MaxSegments = 512;
 
         // ---- DuckDuckGo ----
-        // 两步：先 GET /translate 拿 vqd-4 令牌，再带 x-vqd-4 头 POST。令牌是会话级的，拿到后可以复用。
-        // 2026-09-08 实测这条通道【在当前网络下已经不通】：GET /translate 302 跳到 /?q=translate&&rpl=1（随后 202，无 vqd），
-        // 首页 200/311 KB 里整页找不到 vqd，POST /translate 回 405 nginx —— 正是游戏日志里那条
-        // 「请求失败: (405) Not Allowed | 服务端：<html>…nginx…」。换过的其它端点也全灭：
-        // /translate/vqd= 410 Gone、api.duckduckgo.com/translate 301、/t/iaui/translate 502。
-        // 代码先留着（拦截策略可能因网络/地区而异），但界面说明不许把它写成「稳定可用」。
-        public const string DuckDuckGoTranslateUrl = "https://duckduckgo.com/translate";
+        // 两步握手：先 GET /translate 从页面里抠出 vqd 令牌，再 POST 真正干活的 /translation.js。
+        //
+        // 2026-09-08 那次判它"死了"是【误判】，三条独立的 bug 叠在一起（2026-09-27 逐条实测复核）：
+        //   ① 抓令牌的样式不对：页面里写的是 vqd="4-…"（等号后面直接是引号），
+        //      而老的 DuckDuckGoVqd 只认 "vqd-4": 与 vqd=4- 两种，所以永远抓不到；
+        //      更巧的是 GET /translate 那记 302 跟进去之后那一页里【本来就有一枚有效令牌】。
+        //   ② 端点不对：POST /translate 确实回 405 nginx —— 翻译正文根本不在 /translate 上，
+        //      而在 /translation.js?q…&to… 上（这也是为什么各种资料里都找不到"DDG 翻译 API"）。
+        //   ③ 请求体形状不对：老代码发的是 {"from_lang"…,"to_lang"…,"text"…} 那段 JSON，
+        //      而这个端点把正文当【纯文本】读 —— 实测它会把那串 JSON 本身机翻成中文（连全角冒号都给你翻出来）。
+        //      另外响应里的键是 "translated"，不是老解析器读的 "translation"。
+        // 现在这套是跑通过的：连打 30 次全 200、约 0.5 秒一次，没遇到 429 / Retry-After。
+        // ⚠ 与谷歌那条同一性质的账：这是搜索结果页【前端自己】用的内部端点，不是公开 API，
+        //   所以哪天开始回 400/403 先怀疑改版，别当成玩家的网络问题；也别再往这条链上追加第三个端点。
+        //   免 key 通道的 ToS 顾虑与谷歌那条同档，作者知情后选择保留（交接文档 §4 P4 同一笔账）。
+        public const string DuckDuckGoTranslateUrl = "https://duckduckgo.com/translate";      // 只用来拿令牌
+        public const string DuckDuckGoApiUrl = "https://duckduckgo.com/translation.js";       // 真正翻译的那一条
 
-        // 页面里两种写法都出现过："vqd-4":"4-xxx" 与 vqd=4-xxx，都捞一下。
+        // 实测的正文上限：1000 字符（1001 直接 400 invalid_text）。按【字符】算，不按字节。
+        // 超了不是报错就是被截，所以调用方必须自己切句 —— 本模组的界面文案都在几十字量级，正常撞不到。
+        public const int DuckDuckGoMaxChars = 1000;
+
+        public static bool DuckDuckGoTooLong(string text) => (text ?? "").Length > DuckDuckGoMaxChars;
+
+        // 页面里三种写法都捞一下：vqd="4-…"（实测 SERP 页就是这么写的）、"vqd-4":"4-…"、vqd=4-…（查询串写法）。
+        // 令牌是一串以 "4-" 开头的数字，允许中间有 '-'。
         public static string DuckDuckGoVqd(string html)
         {
+            if (string.IsNullOrEmpty(html)) return null;
             string v = Json.FirstString(html, "vqd-4");
             if (!string.IsNullOrEmpty(v)) return v;
-            if (string.IsNullOrEmpty(html)) return null;
-            int i = html.IndexOf("vqd=4-", StringComparison.Ordinal);
-            if (i < 0) i = html.IndexOf("vqd%3D4-", StringComparison.OrdinalIgnoreCase);
-            if (i < 0) return null;
-            i = html.IndexOf("4-", i, StringComparison.Ordinal);
-            if (i < 0) return null;
-            int end = i;
-            while (end < html.Length && (char.IsLetterOrDigit(html[end]) || html[end] == '-')) end++;
-            string tok = html.Substring(i, end - i);
-            return tok.Length > 2 ? tok : null;
+            v = Json.FirstString(html, "vqd");
+            if (!string.IsNullOrEmpty(v)) return v;
+            foreach (string marker in new[] { "vqd=\"", "vqd=4-", "vqd%3D4-" })
+            {
+                int i = html.IndexOf(marker, StringComparison.Ordinal);
+                if (i < 0) continue;
+                int start = marker == "vqd=\"" ? i + marker.Length : html.IndexOf("4-", i, StringComparison.Ordinal);
+                if (start < 0) continue;
+                int end = start;
+                while (end < html.Length && (char.IsLetterOrDigit(html[end]) || html[end] == '-')) end++;
+                string tok = html.Substring(start, end - start);
+                if (tok.Length > 2) return tok;
+            }
+            return null;
         }
 
-        public static string DuckDuckGoBody(string text, string fromLang, string toLang)
+        // from 留空 = 让它自己识别（实测识别得很准：日文原文回 detected_language:"ja"）。
+        // ⚠ 别把空串写成 "auto"：from=auto 实测直接 400，而这个端点【没有】"auto" 这个取值。
+        public static string DuckDuckGoUrl(string vqd, string fromLang, string toLang)
         {
-            return "{\"from_lang\":\"" + Json.Escape(fromLang) + "\",\"to_lang\":\"" + Json.Escape(toLang)
-                 + "\",\"text\":\"" + Json.Escape(text) + "\"}";
+            var sb = new StringBuilder(DuckDuckGoApiUrl);
+            sb.Append("?vqd=").Append(Uri.EscapeDataString(vqd ?? ""));
+            sb.Append("&query=translate");                       // 实测：令牌是【按 query 算】的，换成别的值就是 403
+            if (!string.IsNullOrEmpty(toLang)) sb.Append("&to=").Append(Uri.EscapeDataString(toLang));
+            if (!string.IsNullOrEmpty(fromLang)) sb.Append("&from=").Append(Uri.EscapeDataString(fromLang));
+            return sb.ToString();
         }
 
-        // {"translation":"译文","source_language":"en","target_language":"zh-Hans"}
+        // 正文就是原文本身：UTF-8 裸文本，不转 JSON、不做 url 编码（Content-Type 实测不影响结果）。
+        // 老代码在这里拼 JSON 对象，是"DDG 用不了"的三个原因之一。
+        public static string DuckDuckGoBody(string text) => text ?? "";
+
+        // {"detected_language":"en","translated":"…"} —— 键名是 translated，不是 translation。
         public static string DuckDuckGoParse(string resp)
         {
-            string t = Json.FirstString(resp, "translation");
+            string t = Json.FirstString(resp, "translated");
+            if (string.IsNullOrEmpty(t)) t = Json.FirstString(resp, "translation");   // 旧形状兜一下，改版前不至于立刻全哑
             return string.IsNullOrEmpty(t) ? null : t.Trim();
+        }
+
+        // 失败时回 {"error":"invalid_to"} / invalid_text / …：捞出来进日志，比"没译文"好定位。
+        public static string DuckDuckGoError(string resp)
+        {
+            string e = Json.FirstString(resp, "error");
+            return string.IsNullOrEmpty(e) ? null : e;
         }
 
         // ---- MyMemory（邮箱选填，填了额度从 5000 字符/天提到 50000）----
@@ -1012,6 +1121,10 @@ namespace Cs2AutoTranslator
         public static string MyMemoryParse(string resp)
         {
             string t = Json.FirstString(resp, "translatedText");
+            // 2026-09-27 探针补的一条实况：它有时会回 **200 + 空 translatedText**（实测 en|ja 翻单词 'hello'
+            // 回 {"responseData":{"translatedText":""},"match":1} —— 公共翻译记忆里存了一条空值）。
+            // 这是【间歇空值】不是超额：下面按"没有译文"处理 → 那条文本会退避重试，重试通常就好了。
+            // 别把它读成配额信号（超额另有 quota 字段与 MYMEMORY WARNING 文案，走下面几道守卫）。
             if (string.IsNullOrEmpty(t)) return null;
             // 超额/异常时它回一句英文说明而不是译文，必须挡掉，否则那句话会被当成译文上屏。
             if (t.IndexOf("MYMEMORY WARNING", StringComparison.OrdinalIgnoreCase) >= 0) return null;
@@ -1029,12 +1142,16 @@ namespace Cs2AutoTranslator
         }
 
         // ---- Yandex ----
-        // 用户选的方案：免 key 网页通道先试，填了 IAM token 就走官方 API。
-        // 实测（2026-09-08）：免 key 网页通道【已经死了】—— translate.yandex.net 直接 404
+        // 用户选的方案：免 key 网页通道先试，填了 API key 就走官方接口。
+        // 实测（2026-09-08）：免 key 网页通道【已经死了】—— 抓 sid 用的 /api/v1/tr.json/uuid 直接 404
         // （游戏日志里的「抓首页失败: (404) Not Found」就是它），换到 translate.yandex.com 虽然回 200，
         // 但整页 41 KB 里一个 sid 都找不到（改成了纯 JS 壳，sid 由前端运行时生成）。
-        // 更早的结论仍然成立：/api/v1/tr.json/uuid 已下线，/translate 直接 POST 回 {"code":405,"message":"Session is invalid"}。
-        // 所以这里保留抓取代码只为「万一哪天又露出来」，实际可用的只有下面填 IAM token 的官方 API 分支；
+        // 2026-09-27 再确认：就算跳过 uuid、直接 POST /api/v1/tr.json/translate 也是 403
+        // {"code":405,"message":"Session is invalid"} —— 没有有效会话它就一个字都不翻。
+        // ⚠ 别把这条误读成"整个 translate.yandex.net 都没了"：同一主机的【官方 v1.5 key 接口】今天活着
+        //   （见下面 YandexOfficialUrl），死的只是免 key 那套会话握手。真·死掉的是老的 Cloud 版主机
+        //   translate.api.yandex.net（NXDOMAIN）。
+        // 所以这里保留抓取代码只为「万一哪天又露出来」，实际可用的只有下面填 API key 的官方分支；
         // 界面侧已把 Yandex 归到「需注册」档（EngineKit.IsNoSignup / MissingField）。抓不到就明确失败，不要瞎猜。
         public const string YandexHome = "https://translate.yandex.com/";
 
@@ -1085,10 +1202,22 @@ namespace Cs2AutoTranslator
             return sb.ToString();
         }
 
-        // 官方 v1.5.1（IAM token / API key）
+        // 官方接口（填了 key 走这条）。2026-09-27 实测把主机与版本一起换回【v1.5】：
+        //   · 原先写的 translate.api.yandex.net/translate/v1.5.1.json/translate 这个主机【已经不存在】——
+        //     DNS 直接 NXDOMAIN（本机 node dns.lookup = ENOTFOUND；直连与走代理都是 000，
+        //     见 state\engine-audit-2026-09-27\out\yandex_official.proxy.cerr），也就是说 key 填得再对
+        //     也永远连不上，玩家看到的就是"Yandex 用不了"这一条。
+        //   · translate.yandex.net/api/v1.5/tr.json/translate 今天活着：假 key 实测回 403、体是
+        //     {"code":401,"message":"API key is invalid"}（out\yandex_v15_key.proxy.txt）—— 服务端自己把它叫
+        //     "API key"，所以界面文案也从"IAM 令牌"改成"API key"。
+        //   · ⚠ 路径里的版本号【不能省成 v1】：/api/v1/tr.json/translate 实测回 410
+        //     "Yandex.Translate API v1 is no longer active. Please migrate to API v1.5"。
+        //     免 key 网页通道那条用的正是 v1 路径（见 YandexWebUrl），两条别混——那条按 v1 已经死了。
+        //   · 换回 v1.5 还有个连带好处：成功响应就是 YandexParse 一直在读的 {"code":200,"text":["…"]} 那个形状，
+        //     解析器与 Lang.Yandex 一个字都不用改；lang 只给目标码（如 zh）＝让它自己识别源语言，与其余引擎一致。
         public static string YandexOfficialUrl(string apiKey, string text, string targetLang)
         {
-            return "https://translate.api.yandex.net/translate/v1.5.1.json/translate?key=" + Uri.EscapeDataString(apiKey)
+            return "https://translate.yandex.net/api/v1.5/tr.json/translate?key=" + Uri.EscapeDataString(apiKey)
                  + "&lang=" + Uri.EscapeDataString(targetLang)
                  + "&format=plain&text=" + Uri.EscapeDataString(text ?? "");
         }

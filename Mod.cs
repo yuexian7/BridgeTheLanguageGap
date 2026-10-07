@@ -15,6 +15,9 @@ using Colossal.Logging;
 using Game.Modding;
 using Game.SceneFlow;
 using Game.UI.Localization;
+// v1.1.3：选项行的标题与说明挂在 NamedWidget 上。用别名而不是整条 using ——
+// Game.UI.Widgets 里有个 Label/Button 之类与本项目里其它名字撞车的类型，整条引进来会把编译搞脏。
+using NamedWidget = Game.UI.Widgets.NamedWidget;
 using HarmonyLib;
 using cohtml.Net;
 using TranslationData = cohtml.Net.ILocalizationManager.TranslationData;
@@ -48,7 +51,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.0.4：设置界面「快捷键与其它」页在日志板块下方新增「关于」板块，显示模组版本与作者并给出三个跳转按钮；模组自身界面文案按游戏官方语言包逐条校对用词) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.5：点「清除缓存」或关掉翻译的那一刻就把【所有页面】上我们写过的文字放回原文——包括你没打开的那几页；清除缓存时还在网络上的那几条译文也不会再把刚清掉的缓存写回来) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -66,13 +69,16 @@ namespace Cs2AutoTranslator
             ModLog.Info("[线程] 后台工作线程已启动（并发 " + kWorkerCount + " 条 × 每请求最多 " + BatchKit.MaxItems + " 条）。");
         }
 
-        // 反馈2：同时在飞的网络请求数。为什么是 3：
-        // · 总请求数由「待翻条数 ÷ 每批条数」决定，加线程【不增加】总请求数，只是让它们重叠；
-        //   免费档的限流按【每分钟请求数】算，所以真正需要防的是「三条一起撞墙」——由全局退避兜（见 CooldownMs）。
-        // · 再往上加对玩家没好处：瓶颈是服务端生成速度，不是本地排队；而线程越多，同一屏的文字
-        //   越可能被拆成几批各翻各的，白白多花几份请求。
-        // · 3 条 = 一次视野内 36 条名字重叠着传，实测足够让「点一下界面等三秒」变成「点三四个界面才等一次」。
-        private const int kWorkerCount = 3;
+        // 反馈2：同时在飞的网络请求数。3 条是 2026-09 那轮定的；v1.0.5 玩家报「整屏文本要等半天」，抬到 5。
+        // 为什么只抬到 5、以及为什么【不去动每批条数】（BatchKit.MaxItems 仍是 12）：
+        // · 加线程不减少总请求数，只是让它们重叠 —— 收益接近线性，直到撞上限流；真限流由全局退避兜住
+        //   （CooldownMs / 连续失败计数），要防的是"5 条一起撞墙后各自退避一遍"。
+        // · 每批条数不敢跟着抬：编号协议要求引擎把「1. 文本 / 2. 文本」逐行原样回出来，一批越长越容易
+        //   在某一格对不齐而【整批作废】—— 作废 = 白烧一次请求 + 退回单条重发，比不加还慢。
+        //   最脆的是 AI 那几家（输出被截断就整批废），MT 那几家只是"没那么容易废"，不是"不会废"。
+        // · 线程越多也越可能把同一屏的文字拆成几批各翻各的，反而多花请求；5 条差不多是这条收益曲线的拐点，
+        //   再往上要先把「按队列层级组批」改掉才划算。要回退只需改回 3，日志第一行照实报并发数。
+        private const int kWorkerCount = 5;
 
         private static void WorkerLoop()
         {
@@ -157,12 +163,25 @@ namespace Cs2AutoTranslator
             {
                 // v0.28：落盘全部由本后台线程做【增量追加】（攒够一批或最晚 5 秒一次），主线程完全不碰缓存磁盘 I/O。
                 TranslationCache.Flush(false);
-                WaitForCooldown();     // 反馈2：被限流时三条 worker 一起歇，别让另外两条接着去撞同一堵墙。
+                // 反馈2：撞墙时几条 worker 一起歇，别让另外几条接着去撞同一堵墙。
+                // v1.1.4：这一等从此【分档】—— 前台（界面文字）还有活的时候只等前台那一档，
+                // 世界文字（路名/区名）那场洪水造成的限流不许把玩家眼前那一屏冻住 20 秒。
+                WaitForCooldown(TransMap.HasFrontWork);
                 string src = TransMap.Take(500);
                 if (src == null) { RefreshUi(true); continue; } // 队列空闲：把还没刷出去的译文一次性刷到界面。
 
+                // v1.1.5：出发时抄一张"清代代际戳"（判据 EngineKit.ResultStillWanted）。
+                // 这一条请求要在网上跑 0.1~8 秒，而玩家随时可能在这几秒里点下「清除缓存」——
+                // 那时候刚被清空的内存表、刚被删掉的 translation.cache 文件、还有那两条刚排空的队列，
+                // 都会被这条回来的结果重新填上。旧写法只防了「请求期间换了目标语言」那一格
+                //（TranslatorSetting.Instance?.TargetLocale != target），没有"出发之后被清过"这一格。
+                int gen = TranslationCache.ClearStamp;
+
+                // 这一条走的是哪一档（与它进的是哪条队列同一本台账，见 TransMap.QueueFor）。
+                bool world = TransMap.IsWorldSource(src);
+
                 TranslatorSetting setting = TranslatorSetting.Instance;
-                if (setting == null) { TransMap.Requeue(src); Thread.Sleep(500); continue; }
+                if (setting == null) { RequeueOrDrop(src, gen); Thread.Sleep(500); continue; }
 
                 string target = setting.TargetLocale;
                 ITranslationEngine engine = TranslationEngines.Get(setting.TranslationEngine);
@@ -178,7 +197,7 @@ namespace Cs2AutoTranslator
                                     "已暂停翻译并在界面保留原文；去选项里填好后点「保存设置并翻译」。");
                     }
                     Patches.MarkerEnabled = false;
-                    TransMap.Requeue(src);
+                    RequeueOrDrop(src, gen);
                     Thread.Sleep(1500);
                     continue;
                 }
@@ -186,17 +205,19 @@ namespace Cs2AutoTranslator
 
                 // 反馈7：能攒批的引擎先攒批 —— 一个视野里几十条路名/区名，逐条请求就是几十次网络往返。
                 // TryBatch 返回 false 表示「这次没凑够两条」或「src 命中了缓存不必发」，交回下面的单条路径。
-                if (engine.Batchable && BatchKit.CanBatch(src) && TryBatch(setting, engine, target, src)) continue;
+                if (engine.Batchable && BatchKit.CanBatch(src) && TryBatch(setting, engine, target, src, world, gen)) continue;
 
                 try
                 {
                     // 命中磁盘缓存：不再联网。缓存里 value==src 表示「已知无需翻译」。
+                    // ⚠ 这一格【不加】代际戳闸门，是有意为之：清代会把内存表与文件一起删干净，
+                    // 所以现在还能命中的条目只能是"清代之后新写进去的"，那正是玩家要的当前内容。
                     string cached = TranslationCache.Get(engine.CacheName, src, target);
                     if (cached != null)
                     {
                         if (cached == src) TransMap.ResolveAsSkip(src);
                         else TransMap.SetTranslation(src, cached);
-                        ResetFailStreak();
+                        ResetFailStreak(world);
                         _uiDirty = true;
                         RefreshUi(false);
                         continue;
@@ -209,36 +230,71 @@ namespace Cs2AutoTranslator
                     string raw = engine.Translate(setting, masked, "auto", target);
                     // 反馈1/2：紧跟着把这次的 HTTP 状态取走（线程私有，取完即清）。失败还是成功都要取，
                     // 否则上一轮的 429 会挂在线程上，被下一轮无关的失败当成原因。
+                    // v1.1.2：同一次还要取走"是不是连接层就没通"，两个值是同一次失败的两半，必须成对消费。
                     int status = EngineBase.ConsumeStatus();
+                    bool connFail = EngineBase.ConsumeConnectFailure();
                     string trans = TransGuard.Unmask(raw, guardTokens);
 
                     // 翻译途中用户可能改了目标语言：结果作废，退回队列按新目标重翻。
-                    if (TranslatorSetting.Instance?.TargetLocale != target) { TransMap.Requeue(src); continue; }
+                    if (TranslatorSetting.Instance?.TargetLocale != target) { RequeueOrDrop(src, gen); continue; }
+
+                    // v1.1.5：请求在外面跑的时候玩家点了「清除缓存」/改了设置 ⇒ 这一条结果已经不是他要的了。
+                    // 不回写内存表、不回写磁盘（那正是"清了又长回来"的那只手）、也不退回队列
+                    //（TransMap.Reset 刚把 WorldSources 清空，此刻的 Requeue 会把路名错投进前台那一队）。
+                    if (!EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp)) { DropStale(src); continue; }
 
                     if (string.IsNullOrEmpty(trans))
                     {
-                        // 引擎无返回（多半是网络/限流/key 问题）：不确定的结论，按次数退避后重试；
-                        // 连失败三次这条就判死，别再让它把整条队列拖着（需求9d 的「不一次判死」仍然成立）。
-                        OnFailure(src, status);
+                        // 引擎无返回：分流见 OnFailure —— 限流/连接不通不烧这条文本的预算，文本自身翻不成才按次数判死。
+                        OnFailure(src, status, connFail, world, gen);
                         continue;
                     }
 
-                    ResetFailStreak();
-                    FinishOne(src, trans, target, engine);
+                    ResetFailStreak(world);
+                    FinishOne(src, trans, target, engine, gen);
                     _uiDirty = true;    // 无论翻成还是判定跳过，都要刷新界面（去掉「…」标记或换上译文）。
-                    RefreshUi(false);   // 节流：突发翻译时最多每 1.5 秒原地刷新一次可见文字。
+                    RefreshUi(false);   // 节流：突发翻译时最多每 UiRefreshIntervalMs（900ms）刷一次可见文字。
 
-                    Thread.Sleep(120); // 轻微节流，别刷爆免费额度/被限流。
+                    Thread.Sleep(PaceMsFor(world)); // 轻微节流，别刷爆免费额度/被限流（撞过 429 之后这一档会自动变长，见 SlowPace）。
                 }
                 catch (Exception ex)
                 {
                     // 异常同样按「不确定」处理，但一样有次数上限（需求9d 只要求「不因一次抖动判死」，不要求无限重试）。
                     ModLog.Error("[懒翻译] 处理异常（稍后重试该条）: " + ex.Message);
-                    OnFailure(src, EngineBase.ConsumeStatus());
+                    OnFailure(src, EngineBase.ConsumeStatus(), EngineBase.ConsumeConnectFailure(), world, gen);
                 }
             }
             TranslationCache.Flush(true);   // 正常退出循环：把攒下的增量条目强制写干净。
             ModLog.Info("[懒翻译] 后台循环退出。");
+        }
+
+        // ===== v1.1.5：清代期间回到本线程的结果怎么处置 =====
+        // 两条动作，都只涉及【这一条文本】，不动全局那几笔账（退避/熔断/间距是服务端与本机的事实）：
+        //   · RequeueOrDrop：还要 ⇒ 退回队列；出发之后被清过 ⇒ 直接丢弃。
+        //     为什么不退回：TransMap.Reset() 刚把两条队列排空、把 WorldSources 那本台账清空，
+        //     此刻的 Requeue 等于把旧活塞进【刚清空的新队列】，而且路名会被错认成界面文字挤进前台那一队
+        //     —— 那是 v1.1.4 好不容易分开的两档，不该被一次点击搅回去。
+        //   · DropStale：结果已经拿到了，但内存表与磁盘都不能写（判据见 EngineKit.ResultStillWanted）。
+        //     界面上这一处不会就此丢掉：下一轮扫描 / 下一次取词会按【当前设置】重新入队，
+        //     所以"丢弃旧结果"的净效果是"按玩家此刻要的语言重翻一遍"，额度上是多花一次，
+        //     但语义正确 —— 而"清过的缓存不该自己长回来"是玩家明确表达过的期望。
+        private static void RequeueOrDrop(string src, int gen)
+        {
+            if (EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp)) { TransMap.Requeue(src); return; }
+            DropStale(src);
+        }
+
+        private static int _lastStaleLog;
+
+        private static void DropStale(string src)
+        {
+            TransMap.DropStale(src);
+            int now = Environment.TickCount;
+            if (now - _lastStaleLog < 8000) return;      // 一次清代会连着回来好几条：说一次就够，别刷屏
+            _lastStaleLog = now;
+            ModLog.Info("[清代] 玩家点「清除缓存」/按「重新翻译」的那一刻还有请求在路上：累计已丢弃 "
+                        + TransMap.StaleDropped + " 条结果。它们没有写回内存译文表、也没有写进 translation.cache，"
+                        + "所以清完之后缓存不会自己长回来；这些文字下一轮会按当前设置重新排队。");
         }
 
         // 反馈7：一条文本失败之后的统一处理 —— 决定退避多久、要不要收紧重试预算。
@@ -253,63 +309,180 @@ namespace Cs2AutoTranslator
         //   401/402/403/404 → 账号或模型层面的硬结论（实测硅基流动的 402 余额不足、OpenRouter 的 404
         //   「此模型无免费档」都被旧逻辑当成网络抖动重试了一整轮），立刻进入熔断档位并说清原因。
         private const int DeadEndpointAfter = 12;
-        private const int RateLimitCooldownMs = 20000;
+        private const int RateLimitCooldownCapMs = 20000;   // 连续限流时的封顶档（就是 v1.1.3 以前那一档）
+        private const int ConnectCooldownMs = 12000;
 
-        private static int _failStreak;
-        private static int _cooldownUntil;
+        // ===== v1.1.4：退避记账【分前台 / 世界两档】 =====
+        // 为什么必须分：世界文字（路名/区名）天然是一大坨 —— 进一趟存档动辄几千条，全挤在同一条链上
+        // 撞限流。而 0.5 秒前刚把退避做成"全局一份"的后果就是玩家 2026-10-02 报的那句
+        // 「开启翻译后很久都没翻译」：背景洪水造成的 429 把玩家眼前那一屏一起冻住 20 秒。
+        // 规矩是用户定的那条：背景活永远不许停前景活。前台（界面文字）只等自己的账，
+        // 世界档等 max(自己, 前台)（世界本来就排在后面，多等一会儿毫无影响）。
+        private const int FRONT = 0;
+        private const int WORLD = 1;
+        private static int Tier(bool world) { return world ? WORLD : FRONT; }
 
-        private static void ResetFailStreak() { Interlocked.Exchange(ref _failStreak, 0); }
+        private static readonly int[] _failStreak = new int[2];
+        private static int _cooldownUntil;          // 前台冷却终点
+        private static int _worldCooldownUntil;     // 世界冷却终点
+        private static int _rateStreak;             // 连续第几次撞 429 ⇒ 决定歇多久（见 EngineKit.RateLimitCooldownMs）
 
-        private static void OnFailure(string src, int status)
+        // v1.1.2 自适应节流：撞限流就把【请求间距】拉长（120 → 400 → 900 → 1200 封顶），连续翻成一批后再降回来。
+        // 为什么不是"加/减线程"：并发数是线程数，决定撞不撞墙的是【同一个 key 在单位时间里的请求次数】。
+        // 旧写法是"5 条一起歇 20 秒，再以原速一起撞回去"，等于每 20 秒精确重现一次同一场限流风暴
+        // （2026-10-01 15:08:36 就是这个形状：开局一秒内三条 429，接着一整屏文字各烧掉一次重试机会）。
+        // 间距自适应治的正是这个，而且对不需要限流的引擎毫无代价（连续成功 20 条就提速回 120ms）。
+        // v1.1.4：这一档也按【前台 / 世界】分开。同一条免费 key 上，世界洪水会把共享的间距顶到 1200ms，
+        // 于是界面文字也按 1200ms 一条地走 —— 50 条就要 20 秒，那还是玩家眼里的"半天没动静"。
+        private static readonly int[] _pace = new int[] { 120, 120 };
+        private const int PaceMinMs = 120;
+        private const int PaceMaxMs = 1200;
+        private static readonly int[] _goodRun = new int[2];
+
+        public static int PaceMs { get { return PaceMsFor(false); } }        // 诊断口径：报的是前台那一档
+        public static int PaceMsFor(bool world) { return Volatile.Read(ref _pace[Tier(world)]); }
+
+        private static void SlowPace(bool world)
         {
-            int n = Interlocked.Increment(ref _failStreak);
+            int i = Tier(world);
+            Interlocked.Exchange(ref _pace[i], Math.Min(PaceMaxMs, Volatile.Read(ref _pace[i]) * 2 + 100));
+            Interlocked.Exchange(ref _goodRun[i], 0);
+        }
+
+        private static void EasePace(bool world)
+        {
+            int i = Tier(world);
+            if (Volatile.Read(ref _pace[i]) <= PaceMinMs) return;
+            if (Interlocked.Increment(ref _goodRun[i]) < 20) return;     // 攒够一程才提速，免得在限流边缘来回摆
+            Interlocked.Exchange(ref _goodRun[i], 0);
+            Interlocked.Exchange(ref _pace[i], Math.Max(PaceMinMs, Volatile.Read(ref _pace[i]) / 2));
+        }
+
+        // 一条文本翻成功了：这一档的连续失败计数清零、间距往回收。
+        // 顺带把"连续限流第几次"也收回 —— 间距都已经回到地板了，说明这一程是真通畅了，
+        // 下次再撞 429 应当重新按"第一次"只歇 3 秒，而不是继续用上次风暴留下的封顶档。
+        private static void ResetFailStreak(bool world)
+        {
+            Interlocked.Exchange(ref _failStreak[Tier(world)], 0);
+            EasePace(world);
+            if (!world && PaceMsFor(false) <= PaceMinMs) Interlocked.Exchange(ref _rateStreak, 0);
+        }
+
+        // 单条与批量共用的"这条为什么没翻成"分流。connFail = 失败发生在【连接层】（没拿到任何 HTTP 响应）。
+        // v1.1.2 最关键的一条：外部条件造成的失败（限流 / 本机出口不通）不再消耗这条文本的重试预算，
+        // 改记在 TransMap 的"弹回账"上。旧写法一次限流风暴就能把一整屏文本各烧掉一次机会，三条 429 就够
+        // 把半屏判死 —— 那就是玩家看到的「一个框 6、7 个选项只翻了一半，之后再也不补」。
+        // 文本自身翻不成（引擎回空、账号级回绝）仍然按次数判死，否则一条坏文本会拖着整条队列。
+        // v1.1.4：world = 这条源文本是不是【世界文字】（路名/区名）。退避与熔断计数从此分档记账，
+        // 因为世界文字天生是一大坨：它撞的墙不许把玩家眼前那一屏一起冻住（用户 2026-10-02 报的就是这个形状）。
+        private static void OnFailure(string src, int status, bool connFail, bool world, int gen)
+        {
+            int i = Tier(world);
+            int n = Interlocked.Increment(ref _failStreak[i]);
+            // v1.1.5：这条文本自己还要不要 —— 全局那几笔账（退避、熔断、日志）照记，
+            // 因为限流/出口不通是【服务端与本机】的事实，与"玩家清没清缓存"无关；
+            // 但这一条不再退回队列，也不再烧它的重试预算。
+            bool stale = !EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp);
 
             if (status == 429)
             {
-                NoteRateLimited();
-                TransMap.NoteFailure(src, TransMap.MaxAttempts);
+                int waitMs = NoteRateLimited(world);
+                SlowPace(world);
+                if (stale) DropStale(src);
+                else if (TransMap.NoteTransient(src) == 0) TransMap.NoteFailure(src, TransMap.MaxAttempts);
                 if (n == 1)
-                    ModLog.Warn("[限流] " + EngineKit.DescribeStatus(429) + "：所有翻译线程一起歇 "
-                                + (RateLimitCooldownMs / 1000) + " 秒再继续（已翻好的部分照常显示，不用等）。");
+                    ModLog.Warn("[限流] " + EngineKit.DescribeStatus(429) + "："
+                                + (world ? "世界文字（路名/区名）这一档先歇 " : "界面文字这一档先歇 ")
+                                + (waitMs / 1000) + " 秒再继续，间距抬到 " + PaceMsFor(world) + " 毫秒。"
+                                + (world ? "界面文字不等这一档：前面的队列照翻，玩家眼前那一屏不会因此卡住。"
+                                          : "世界文字（路名/区名）跟着一起等，免得继续撞同一堵墙。")
+                                + "已翻好的部分照常显示，不用等；这一屏里因限流没翻成的文字【不会被判死】，通了自动补上。");
+                return;
+            }
+
+            if (connFail)
+            {
+                // 换出口重试已经在 Http.Send 里做过一轮，这里负责"歇一歇 + 别烧文本 + 说清是哪段路不通"。
+                PushCooldown(ConnectCooldownMs, world);
+                if (n == 1)
+                    ModLog.Warn("[网络] 连不上翻译服务端（当前出口＝" + Http.EgressName + "，系统代理＝"
+                                + (Http.ProxyHint() ?? "?") + "）。这不是 key 的问题，也不是这些文字的问题："
+                                + "本模组已自动改用另一条出口（走代理 ↔ 直连）重试，之后仍不通就保留原文继续排队，"
+                                + "出口一恢复自己补完，不用重启游戏。");
+                if (stale) DropStale(src);
+                else if (TransMap.NoteTransient(src) == 0) TransMap.NoteFailure(src, TransMap.MaxAttempts);
+                Thread.Sleep(Math.Min(2000, 400 * n));
                 return;
             }
 
             bool permanent = EngineKit.IsPermanentStatus(status);
-            if (permanent) Interlocked.Exchange(ref _failStreak, DeadEndpointAfter);
+            if (permanent) Interlocked.Exchange(ref _failStreak[i], DeadEndpointAfter);
             if (n == 1 && permanent)
                 ModLog.Warn("[引擎] 服务端直接回绝（HTTP " + status + "）："
                             + (EngineKit.DescribeStatus(status) ?? "详见上一条日志")
                             + "。后续每条只试一次并歇 5 秒，请先去选项里修 key / 换模型 / 换引擎。");
 
-            bool dead = Volatile.Read(ref _failStreak) >= DeadEndpointAfter;
+            bool dead = Volatile.Read(ref _failStreak[i]) >= DeadEndpointAfter;
             if (dead && n == DeadEndpointAfter)
                 ModLog.Warn("[限流] 连续 " + DeadEndpointAfter + " 次都没翻成，判定接口暂时不可用："
                             + "后续每条只试一次并歇 5 秒，先让界面按已翻好的部分刷新（修好 key/换引擎后点保存或重新翻译即可重来）。");
 
-            TransMap.NoteFailure(src, dead ? 1 : TransMap.MaxAttempts);
+            if (stale) DropStale(src);
+            else TransMap.NoteFailure(src, dead ? 1 : TransMap.MaxAttempts);
             if (dead) Thread.Sleep(5000);
             else Thread.Sleep(Math.Min(2000, 400 * n));
         }
 
-        // 把冷却终点往后推（只抬高、不缩短：三条线程同时撞 429 时取最晚的那个）。
-        private static void NoteRateLimited()
+        // 撞限流之后歇多久 —— 由 EngineKit 那把纯函数梯子给（3 → 6 → 10 → 封顶 20 秒）。
+        // v1.1.3 以前第一次就歇满 20 秒：免费档撞一次"每秒速率"级别的 429 根本不该等 20 秒，
+        // 而 2026-10-02 16:00:02 那次就是撞在这里（10 条请求之内撞墙，之后一路正常翻了 400 多条），
+        // 玩家看到的正是"开了翻译半天没动静"。返回实际推到的毫秒数，给日志用。
+        private static int NoteRateLimited(bool world)
         {
-            int until = Environment.TickCount + RateLimitCooldownMs;
-            for (int cur = Volatile.Read(ref _cooldownUntil); until > cur; cur = Volatile.Read(ref _cooldownUntil))
-                if (Interlocked.CompareExchange(ref _cooldownUntil, until, cur) == cur) break;
+            int ms = EngineKit.RateLimitCooldownMs(Interlocked.Increment(ref _rateStreak), RateLimitCooldownCapMs);
+            PushCooldown(ms, world);
+            return ms;
         }
 
-        private static void WaitForCooldown()
+        // 把冷却终点往后推（只抬高、不缩短：三条线程同时撞 429 时取最晚的那个）。
+        // 分档规矩：【前台撞墙】两档一起推（接口在限我们，世界文字继续冲只会把风暴拖长）；
+        //           【世界撞墙】只推世界档（玩家眼前的界面文字不该被背景洪水冻住 —— 用户 2026-10-02 那条规矩）。
+        private static void PushCooldown(int ms, bool world)
         {
-            for (int remain = Volatile.Read(ref _cooldownUntil) - Environment.TickCount;
-                 remain > 0 && !_shutdown;
-                 remain = Volatile.Read(ref _cooldownUntil) - Environment.TickCount)
+            int until = Environment.TickCount + ms;
+            if (!world)
+            {
+                for (int cur = Volatile.Read(ref _cooldownUntil); until > cur; cur = Volatile.Read(ref _cooldownUntil))
+                    if (Interlocked.CompareExchange(ref _cooldownUntil, until, cur) == cur) break;
+            }
+            for (int cur = Volatile.Read(ref _worldCooldownUntil); until > cur; cur = Volatile.Read(ref _worldCooldownUntil))
+                if (Interlocked.CompareExchange(ref _worldCooldownUntil, until, cur) == cur) break;
+        }
+
+        // 前台有活干时只等前台那一档；前台空了、轮到世界文字时等两档里最晚的那个。
+        private static void WaitForCooldown(bool frontOnly)
+        {
+            for (;;)
+            {
+                int remain = (frontOnly ? Volatile.Read(ref _cooldownUntil)
+                                        : Math.Max(Volatile.Read(ref _cooldownUntil), Volatile.Read(ref _worldCooldownUntil)))
+                             - Environment.TickCount;
+                if (remain <= 0 || _shutdown) return;
                 Thread.Sleep(Math.Min(remain, 1000));     // 分段睡：退出收口时最多多等 1 秒，不会卡在长睡眠里。
+            }
         }
 
         // 拿到一条译文之后的统一收尾：单条与批量共用，免得两份逻辑各自走偏。
-        private static void FinishOne(string src, string trans, string target, ITranslationEngine engine)
+        private static void FinishOne(string src, string trans, string target, ITranslationEngine engine, int gen)
         {
+            // v1.1.5 第一件事就是问这一句还要不要：出发之后玩家点了「清除缓存」或按了「重新翻译」
+            //（两处都走 TranslationCache.Clear，它把清代代际戳抬一格）⇒ 这句译文属于【上一次】的结果，
+            // 写下去就是"清了又长回来"：内存表被填回几条、刚删掉的 translation.cache 又被追加出同样的行。
+            // 这里刻意【不】退回队列：清代把两条队列与 WorldSources 台账都清空了，此刻的 Requeue
+            // 等于把旧活塞进新队列，而且路名会被错认成界面文字挤进前台那一队（v1.1.4 分好的两档又搅回去）。
+            // 丢掉不亏：界面上这一处文字还在，下一轮扫描/下一次取词会按【当前】设置自己重新入队。
+            if (!EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp)) { TransMap.DropStale(src); return; }
+
             // 需求5：完整性校验。译文若破坏了占位符（把 {token} 翻成中文、整个吞掉、或凭空增删花括号），
             // 判为不安全 → 还原原文（落进下面的 identity 分支：跳过 + 缓存 identity），绝不让坏译文上屏。
             // 注：不校验数字——机翻把数字与词互转（1,000↔千、双↔2）多为正常，旧数字校验会误杀正文。
@@ -338,7 +511,10 @@ namespace Cs2AutoTranslator
         // ②对不齐的槽位一律按失败处理（退回队列走单条），绝不把甲的译文安到乙头上；
         // ③整批失败只算「一次」全局失败，否则一次网络抖动就是 12 次计数，熔断形同虚设。
         // 返回值 false = 这批没发出去，调用方按原来的单条路径处理 src。
-        private static bool TryBatch(TranslatorSetting setting, ITranslationEngine engine, string target, string src)
+        // v1.1.5 多带一个 stamp（出发时的清代代际戳）：一批最多 12 条，一次清代如果不管这一格，
+        // 回写的就是 12 条旧译文 + 12 行磁盘缓存 —— 比单条路径"污染"得更多。
+        private static bool TryBatch(TranslatorSetting setting, ITranslationEngine engine, string target,
+                                     string src, bool world, int stamp)
         {
             var items = new List<string> { src };
             var deferred = new List<string>();
@@ -350,7 +526,7 @@ namespace Cs2AutoTranslator
                 else deferred.Add(more);                   // 不能进批的先记下，等会儿整批退回，避免同一条被反复取放
                 if (deferred.Count >= BatchKit.MaxItems * 4) break;
             }
-            foreach (string d in deferred) TransMap.Requeue(d);
+            foreach (string d in deferred) RequeueOrDrop(d, stamp);
 
             // 磁盘缓存命中的就地解决，只把没命中的发出去（同一屏里大部分名字其实早就翻好了）。
             var todo = new List<string>();
@@ -375,7 +551,7 @@ namespace Cs2AutoTranslator
             if (todo.Count < 2 || todo[0] != src)
             {
                 int start = (todo.Count > 0 && todo[0] == src) ? 1 : 0;
-                for (int i = start; i < todo.Count; i++) TransMap.Requeue(todo[i]);
+                for (int i = start; i < todo.Count; i++) RequeueOrDrop(todo[i], stamp);
                 return start == 0;
             }
 
@@ -388,56 +564,75 @@ namespace Cs2AutoTranslator
             // 紧跟请求取走状态码（取完即清）：下面每个提前 return 都必须经过这里，
             // 否则这一轮的 429 会挂在线程上，被下一轮无关的请求当成失败原因。
             int status = EngineBase.ConsumeStatus();
+            bool connFailBatch = EngineBase.ConsumeConnectFailure();
 
             // 请求期间玩家改了目标语言：整批作废，退回队列按新语言重来
             if (TranslatorSetting.Instance?.TargetLocale != target)
             {
-                foreach (string t in todo) TransMap.Requeue(t);
+                foreach (string t in todo) RequeueOrDrop(t, stamp);
                 return true;
             }
 
             string[] parts = BatchKit.Split(raw, todo.Count);
+            // v1.1.5：请求期间玩家点了「清除缓存」/改了设置 ⇒ 【整批作废】。
+            // 这一批最多 12 条，放任它回写就是 12 条旧译文进内存表 + 12 行旧缓存重新建进
+            // 刚被删掉的 translation.cache —— 玩家下一次看到的"缓存没清干净"就来自这里。
+            // 逐条 DropStale（各还一笔在飞计数、各计一个丢弃数），下面那圈回写整个跳过。
+            if (!EngineKit.ResultStillWanted(stamp, TranslationCache.ClearStamp))
+            {
+                foreach (string t in todo) DropStale(t);
+                return true;
+            }
+
             int ok = 0, bad = 0;
-            // 与单条路径同一套判据：被限流不是这些文本的错（预算照旧，等冷却完再试）；
+            // v1.1.2：这批是【被外部条件挡掉的】（限流 or 连接不通）还是【这些文字自己翻不成】，处置完全相反。
+            // 外部条件 ⇒ 整批走 TransMap.NoteTransient，不烧每条的重试预算（旧写法一批 12 条一次全废就是
+            // 12 条各扣一次机会，两次限流风暴就够把一整屏判死 —— 玩家看到的「框里 6、7 个选项只翻一半」）；
+            // 自己翻不成 ⇒ 仍按次数判死（引擎回空、账号级回绝、熔断已触发时每条只试一次就放过）。
+            bool external = status == 429 || connFailBatch;
             // 账号级回绝或熔断已触发时，每条只试一次就放过，别让一整批 12 条一起拖着队列。
-            bool dead = status != 429
-                        && (EngineKit.IsPermanentStatus(status) || Volatile.Read(ref _failStreak) + 1 >= DeadEndpointAfter);
+            bool dead = !external
+                        && (EngineKit.IsPermanentStatus(status) || Volatile.Read(ref _failStreak[Tier(world)]) + 1 >= DeadEndpointAfter);
             for (int i = 0; i < todo.Count; i++)
             {
                 string tr = parts[i] == null ? null : TransGuard.Unmask(parts[i], guards[i]);
                 if (string.IsNullOrEmpty(tr))
                 {
-                    TransMap.NoteFailure(todo[i], dead ? 1 : TransMap.MaxAttempts);
+                    // 外部条件挡掉的 ⇒ 弹回队列、不烧预算（弹回满 KMaxTransient 次才降级成普通失败）。
+                    if (external) { if (TransMap.NoteTransient(todo[i]) == 0) TransMap.NoteFailure(todo[i], TransMap.MaxAttempts); }
+                    else TransMap.NoteFailure(todo[i], dead ? 1 : TransMap.MaxAttempts);
                     bad++;
                     continue;
                 }
-                FinishOne(todo[i], tr, target, engine);
+                FinishOne(todo[i], tr, target, engine, stamp);
                 ok++;
             }
 
             if (bad > 0)
             {
-                if (ok == 0) OnBatchFailure(status);                 // 整批全废才算一次全局失败（约束③）
-                else Interlocked.Increment(ref _failStreak);         // 部分对上：接口是活的，只记一笔、不拖慢后面的批次
+                if (ok == 0) OnBatchFailure(status, connFailBatch, world);   // 整批全废才算一次全局失败（约束③）
+                else Interlocked.Increment(ref _failStreak[Tier(world)]);    // 部分对上：接口是活的，只记一笔、不拖慢后面的批次
             }
-            else ResetFailStreak();
+            else ResetFailStreak(world);
 
             if (ok > 0) { _uiDirty = true; RefreshUi(false); }
             ModLog.Info("[批量] 一次请求 " + todo.Count + " 条：对上了 " + ok + " 条，" + bad + " 条退回单条重试"
                         + (raw == null ? "（接口没返回）" : "（模型没按编号回的行会被判对不齐，不会错配）") + "。");
-            Thread.Sleep(120);
+            Thread.Sleep(PaceMsFor(world));
             return true;
         }
 
         // 整批全废的收尾：与 OnFailure 共用同一份全局计数和冷却，但【不碰 TransMap】——
-        // 这批每一条已经在上面的循环里各自 NoteFailure 过了，这里只负责「要不要退避、退避多久」。
+        // 这批每一条已经在上面的循环里各自记账过了，这里只负责「要不要退避、退避多久、要不要换出口」。
         // 单条失败日志里那句人话也不用重复：这批退回单条后，单条路径会自己去撞同一次失败并写日志。
-        private static void OnBatchFailure(int status)
+        private static void OnBatchFailure(int status, bool connFail, bool world)
         {
-            int n = Interlocked.Increment(ref _failStreak);
-            if (status == 429) { NoteRateLimited(); return; }
-            if (EngineKit.IsPermanentStatus(status)) Interlocked.Exchange(ref _failStreak, DeadEndpointAfter);
-            bool dead = Volatile.Read(ref _failStreak) >= DeadEndpointAfter;
+            int i = Tier(world);
+            int n = Interlocked.Increment(ref _failStreak[i]);
+            if (status == 429) { NoteRateLimited(world); SlowPace(world); return; }
+            if (connFail) { PushCooldown(ConnectCooldownMs, world); Thread.Sleep(Math.Min(2000, 400 * n)); return; }
+            if (EngineKit.IsPermanentStatus(status)) Interlocked.Exchange(ref _failStreak[i], DeadEndpointAfter);
+            bool dead = Volatile.Read(ref _failStreak[i]) >= DeadEndpointAfter;
             Thread.Sleep(dead ? 5000 : Math.Min(2000, 400 * n));
         }
 
@@ -459,9 +654,12 @@ namespace Cs2AutoTranslator
         }
 
         // 把新译文/去标记「原地」刷到当前可见界面：调用 Cohtml 的本地化重译（只刷新，不惊动 I18N 等订阅者）。
-        // force=true（队列空闲时）立即刷；否则节流，突发翻译期间最多每 1500ms 刷一次，避免全屏频繁重绘。
-        // 反馈2：三条 worker 会同时想刷界面，所以「查 + 改」这两个字段必须一起做，否则三个线程都判定
-        // 「距上次已经 1.6 秒了」→ 同一帧重绘三遍。派活动作本身只是入队，放在锁外做。
+        // force=true（队列空闲时）立即刷；否则节流。v1.0.5 把 1500ms 降到 900ms：玩家报的"慢"里有一半是
+        // 「译文其实早就落地的、界面还要等下一次刷新」，降这 600ms 不增加任何网络请求，代价只是全屏
+        // 重译的频率从 0.67 次/秒变 1.1 次/秒（一次重译本身只是一次 cohtml 回调）。
+        // 反馈2：多条 worker 会同时想刷界面，所以「查 + 改」这两个字段必须一起做，否则几个线程都判定
+        // 「距上次已经 1 秒了」→ 同一帧重绘三遍。派活动作本身只是入队，放在锁外做。
+        private const int UiRefreshIntervalMs = 900;
         private static readonly object _uiRefreshLock = new object();
 
         private static void RefreshUi(bool force)
@@ -470,7 +668,7 @@ namespace Cs2AutoTranslator
             {
                 if (!_uiDirty) return;
                 int now = Environment.TickCount;
-                if (!force && now - _lastRefreshTick < 1500) return;
+                if (!force && now - _lastRefreshTick < UiRefreshIntervalMs) return;
                 _uiDirty = false;
                 _lastRefreshTick = now;
             }
@@ -507,12 +705,26 @@ namespace Cs2AutoTranslator
                                + (EngineKit.ShowRegister(engine.Name) ? "可点旁边的「跳转注册页面」去申请。" : "");
                     else
                     {
-                        // 固定探针，目标语言=用户设置：验证服务连通的同时，回显能反映目标语言（如日语→こんにちは世界）。
-                        const string probe = "Hello, world";
+                        // 探针句子（v1.0.5 第四条，2026-09-29 用户改的主意）：**固定用英文** "Hello, world"，
+                        // 只有目标语言本身就是英文时才换成中文「你好，世界」—— 英文→英文等于什么都没测。
+                        // （上一版这里曾按【游戏语言】取句，用户实机后说想固定：一般目标语言都在英文之外，
+                        //  英文句子对 14 家引擎都是最稳的一条探针。）判据与那张 44 语表都在 LanguageCatalog。
+                        string probe = LanguageCatalog.ProbeFor(setting.TargetLocale);
                         string trans = engine.Translate(setting, probe, "auto", setting.TargetLocale);
                         // 反馈1：状态码能说出「为什么没成功」，比一律怪网络靠谱得多 ——
                         // 实测这一颗探针就是玩家唯一的诊断入口（402 是没余额、404 是模型没免费档）。
-                        string why = EngineKit.DescribeStatus(EngineBase.ConsumeStatus());
+                        int testStatus = EngineBase.ConsumeStatus();
+                        bool testConnFail = EngineBase.ConsumeConnectFailure();
+                        // v1.1.2：连接层不通必须单独说，而且要说到具体那一段路。旧文案一律是「模型可能已下架或
+                        // 额度不足…也可能是网络/key 不对」，玩家照着去查 key、换模型，而真正的原因在本机出口
+                        // （实机凭据：2026-10-01 15:33 起换任何引擎都是 ConnectFailure「由于目标计算机积极拒绝」，
+                        //  而游戏内外其它网络一切正常 —— 那是系统代理指向的端口没了，与 key 半点关系没有）。
+                        string why = testConnFail
+                            ? "连不上翻译服务端，问题在【本机出口】这一层：现在走的是「" + Http.EgressName + "」，"
+                              + "系统代理指向 " + (Http.ProxyHint() ?? "?") + "。"
+                              + "如果开着代理/VPN 而它已退出，系统代理却还指着那个端口 —— 要么把代理重新打开，"
+                              + "要么在 Windows 的「Internet 选项 → 局域网设置」里取消代理。本模组已经自动试过另一条出口（走代理 ↔ 直连）。"
+                            : EngineKit.DescribeStatus(testStatus);
                         result = string.IsNullOrEmpty(trans)
                             ? $"✗ 「{engine.DisplayName}」请求没成功："
                               + (why ?? "模型可能已下架或额度不足（点上方「获取模型列表」会自动改用可用的免费模型），也可能是网络/key 不对")
@@ -643,6 +855,15 @@ namespace Cs2AutoTranslator
                 WorldLabels.ForceRefresh(Patches.HookEnabled
                     ? "已保存设置并启用翻译，按当前视野重新取一遍世界文字"
                     : "已关闭翻译，世界文字恢复原文");
+                // v1.1.5：关掉总开关是玩家明确说"这些译文我不要了"，所以【每一页】上我们写过的文字都要放回原文 ——
+                // 世界文字那一头有 ForceRefresh 无条件兜底，界面这一头以前只靠"下一次扫描恰好在看那一页"，
+                // 于是没打开的页会一直挂着旧语言的写法（同一格缺陷在清除缓存那一条上最扎眼，见 ClearCacheNow）。
+                // 范围开关也走这条回调（TranslatorSetting.OnLiveSettingChanged += SaveNow），所以这里分两种：
+                //   · 总开关关了 ⇒ 整树"整体不要"，全退回原文；
+                //   · 总开关还开着、只是改了某一档范围/目标语言 ⇒ 整树"只退现在已归范围外的那几处"，
+                //     玩家还想留着的译文一律不动（退了就得重翻 = 白烧额度），而且这一轮同样不排新活。
+                if (!Patches.HookEnabled) DropdownL10n.RevertAll("已关闭翻译");
+                else DropdownL10n.RevertOutOfScope("翻译范围或设置已改");
             }
             catch (Exception ex) { ModLog.Error("[保存] 应用异常: " + ex.Message); }
         }
@@ -739,6 +960,16 @@ namespace Cs2AutoTranslator
             {
                 TranslationCache.Clear();        // 清内存 Dict + 删 translation.cache 文件（含 "self" 命名空间）
                 TransMap.Reset();                // 清运行时译文 → Prefix 全部放行原文
+                // v1.1.5 关键一步：把我们写进控件的译文【当场】放回原文，整棵树都走一遍。
+                // 以前这一步是缺的 —— 还原只能等 DropdownL10n 的下一轮扫描，而那一轮从 v1.1.4 起
+                // 只看玩家当前打开的那一页：实机凭据（2026-10-02）是 20:22:36 还在 AccessAnarchy 页
+                // 上屏韩语、20:22:44 清代之后日志里【一行 [下拉框] 都没有】、20:22:47 第一条的活动页
+                // 已经换成 ToolModeMemory（那一页退了 60 项），AccessAnarchy 那一页则落进
+                // 「整页跳过 23 页」里再没人管 ⇒ 玩家眼睛里的"缓存清了、字还是外语"。
+                // ⚠ 为什么放在翻总开关【之前】：还原扫描自己就把 enabled 当假（Scan 的 forceOff 那一格），
+                // 不依赖 HookEnabled / Paused 的先后；而紧跟着的 SaveNow 里还有一次 RevertAll（关总开关那条路
+                // 自己也要还原），放在前面的话【这一次点击只扫一遍】，日志里那一行写的也就是「已清除缓存」这个原因。
+                DropdownL10n.RevertAll("已清除缓存");
                 TranslatorSetting s = TranslatorSetting.Instance;
                 bool wasOn = s != null && s.Enabled;
                 if (wasOn) s.Enabled = false;    // setter → OnEnabledChanged → SaveNow：写盘 + 可见文字全部回原文
@@ -1093,6 +1324,7 @@ namespace Cs2AutoTranslator
             {
                 TranslationCache.Clear();        // 清内存 Dict + 删 translation.cache 文件
                 TransMap.Reset();                // 清运行时译文
+                DropdownL10n.RevertAll("玩家触发重新翻译");   // v1.1.5：把我们写进控件的旧译文当场放回原文
                 Patches.Paused = false;          // 与 ClearCacheNow 相反：不是要停在原文，而是要马上重翻
                 if (!PersistSettingsOnly()) return;
                 SeedCacheIntoTransMap();         // 磁盘缓存刚清掉，这里等于空跑；保留是为了跟 SaveNow 走同一条路径
@@ -1148,6 +1380,10 @@ namespace Cs2AutoTranslator
             BeginShutdown("OnDispose");
             UninstallGuard();
             FlushOnExit("OnDispose");
+            // v1.1.3 卸载安全：拆掉我们自己在游戏方法上挂的两个补丁（顺序在 UninstallGuard 之后，
+            // 所以守护不会再把它们打回去）。控件里写过的译文不用逐个还原：那些控件（选项页、候选项、
+            // NamedWidget 行）都是游戏每次建页重新生成的对象，页面一重建就是原版文字。
+            Patches.UnpatchOwn(2);
             // 官方模板的做法：把注册进选项界面的设置注销掉，避免残留一个指向已卸载模组的设置页。
             try
             {
@@ -1321,6 +1557,10 @@ namespace Cs2AutoTranslator
             }
             catch { }
             RefreshOptionsPage();
+            // v1.0.5 需求1：整条刷新链【管不到下拉框】—— RefreshPage() 只重跑可见性/标题/说明，
+            // 候选项数组是建页时的快照，前端又按 id 缓存过取词结果（详见 DropdownL10n 的类注释）。
+            // 所以落地的译文必须由 DropdownL10n 自己写回控件；这里挂上同一个刷新时机。
+            DropdownL10n.ScanIfOptionsSeen("有新译文落地");
         }
 
         // 反射重渲染当前可见选项页（需求1）。不直接 typeof(OptionsUISystem)（万一它是 internal 或命名空间不同会导致整个编译失败），
@@ -1342,22 +1582,35 @@ namespace Cs2AutoTranslator
         }
 
         // 向 ECS 世界要 OptionsUISystem 的实例（只能在主线程调）。任何一步拿不到就返回 null，调用方静默跳过。
-        private static object GetOptionsSystem()
+        // internal 而不是 private：v1.0.5 的下拉框扫描器（DropdownL10n）走同一棵树，不复用就得再维护一份
+        // 「游戏版本改了怎么找这个系统」的逻辑 —— 那种平行表正是本文件注释里反复抱怨的东西。
+        internal static object GetOptionsSystem()
         {
             try
             {
                 Type optType = GetOptionsType();
                 if (optType == null) return null;
 
-                Type worldType = typeof(Unity.Entities.World);
-                object world = worldType.GetProperty("DefaultGameObjectInjectionWorld", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                // v1.1.3 性能：这两枚 MemberInfo 每轮扫描都要用一次，而"一轮"在选项页开着时是每 1.2 秒
+                // （外加每条新译文落地）。Type 的静态属性/实例方法在游戏运行期不会变 ⇒ 反射一次记下来。
+                // 拿不到就继续按老路返回 null，行为与旧写法一致（只是少了一遍 GetProperty/GetMethod）。
+                if (_worldInjectPi == null)
+                    _worldInjectPi = typeof(Unity.Entities.World).GetProperty(
+                        "DefaultGameObjectInjectionWorld", BindingFlags.Public | BindingFlags.Static);
+                if (_worldInjectPi == null) return null;
+                object world = _worldInjectPi.GetValue(null);
                 if (world == null) return null;
 
-                MethodInfo getSys = worldType.GetMethod("GetExistingSystemManaged", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(Type) }, null);
-                return getSys?.Invoke(world, new object[] { optType });
+                if (_worldGetSysMi == null)
+                    _worldGetSysMi = typeof(Unity.Entities.World).GetMethod("GetExistingSystemManaged",
+                        BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(Type) }, null);
+                return _worldGetSysMi?.Invoke(world, new object[] { optType });
             }
             catch { return null; }
         }
+
+        private static System.Reflection.PropertyInfo _worldInjectPi;
+        private static MethodInfo _worldGetSysMi;
 
         // 按全名查找 Game.UI.Menu.OptionsUISystem：先 assembly-qualified，再遍历已加载程序集兜底。只查一次并缓存。
         private static Type GetOptionsType()
@@ -1472,12 +1725,34 @@ namespace Cs2AutoTranslator
         // 【internal】属性（getter 非 public），只按 Public 查就永远返回 null —— 这正是反馈2「模型列表推进不去」
         // 的根因：日志里那句「OptionsUISystem.pages 读不到」不是游戏改版，是我们自己把可见性写窄了。
         // 页/板块/选项那一层的成员（id、sections、options、widget）都是 public，唯独入口这两个是 internal。
-        private static object ReadObj(object o, string prop)
+        // internal：DropdownL10n（v1.0.5 需求1）遍历同一棵树，共用这一个「带 NonPublic 的属性读法」。
+        internal static object ReadObj(object o, string prop)
         {
-            const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            try { return o.GetType().GetProperty(prop, F)?.GetValue(o, null); }
+            if (o == null || string.IsNullOrEmpty(prop)) return null;
+            Type t = o.GetType();
+            // v1.1.3 性能：属性信息按 (类型, 属性名) 记一次。这个函数在选项页扫描里是【每个候选项容器每轮
+            // 都要跑好几次】（实机凭据：101 个下拉框 / 4996 项候选，pages→sections→options→widget 四层
+            // 每轮各读一次），旧写法每次都重新 GetProperty —— 与 AccessAnarchy 那条"无变化仍重跑"同形。
+            // 类型在运行期不会改属性表，所以记一次就是永远对；找不到也记 null 免得每轮再试。
+            Dictionary<string, PropertyInfo> map;
+            lock (s_propCache)
+                if (!s_propCache.TryGetValue(t, out map))
+                    map = s_propCache[t] = new Dictionary<string, PropertyInfo>();
+
+            PropertyInfo pi;
+            if (!map.TryGetValue(prop, out pi))
+            {
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                try { pi = t.GetProperty(prop, F); } catch { pi = null; }
+                lock (s_propCache) map[prop] = pi;
+            }
+            try { return pi?.GetValue(o, null); }
             catch { return null; }
         }
+
+        // (类型 → (属性名 → PropertyInfo))。外层用普通字典 + 一把锁：读远多于写，写只在第一次见到某个类型时发生。
+        private static readonly Dictionary<Type, Dictionary<string, PropertyInfo>> s_propCache =
+            new Dictionary<Type, Dictionary<string, PropertyInfo>>();
 
         // 框架可能给页/板块 id 加前缀（例如模组名），所以按后缀比对，大小写不敏感。
         private static bool IdMatches(string id, string want)
@@ -1598,6 +1873,25 @@ namespace Cs2AutoTranslator
             catch (Exception ex) { ModLog.Error("[Hook] patch 失败: " + ex); }
         }
 
+        // v1.1.3 卸载安全：模组被正式拆除（OnDispose）时【主动拆自己的补丁】。
+        // 为什么必须有这一条：本模组从头到尾只打过两个补丁（UILocalizationManager.Translate、
+        // NameSystem.GetRenderedLabelName），都是【游戏自己的方法】。游戏在模组卸载时会不会顺手把
+        // 那个程序集连同跳板一起清掉，我们没有凭据（net48 的程序集实测不可卸载，所以跳板会一直留在
+        // 游戏方法上指向我们的代码）—— 玩家"取消订阅 / 直接删文件夹"之后那局不加载我们了才干净，
+        // 但【同一局里禁用再启用】这类路径如果游戏只是丢掉程序集引用，留着跳板就是无谓的风险。
+        // 拆自己名下的补丁是 Harmony 官方契约里的礼貌动作，代价为零；拆不动也不许把拆除流程带崩。
+        public static void UnpatchOwn(int patchCount)
+        {
+            try
+            {
+                if (_harmony == null) return;
+                _harmony.UnpatchAll(HarmonyId);      // 只拆 owner == 我们 id 的补丁，绝不动别的模组
+                ModLog.Info("[Hook] 卸载时已拆掉本模组的 Harmony 补丁（" + patchCount + " 处）。");
+                _harmony = null;
+            }
+            catch (Exception ex) { ModLog.Warn("[Hook] 卸载时拆补丁失败（不影响退出）: " + ex.Message); }
+        }
+
         // 由 MainThreadDispatcher 每帧调用（非 Harmony，故不受全局 UnpatchAll 影响）：节流检查，被拆了就重打。
         // 关键：返回 false 才会「持续注册」；返回 true 会被 UpdateUpdaters 注销（实测语义）。
         public static bool EnsureApplied()
@@ -1631,6 +1925,10 @@ namespace Cs2AutoTranslator
                 // 直接复用上面的退出闸门与 try/catch；档位关掉时它前几行就返回，不产生开销。
                 WorldLabels.Tick();
 
+                // v1.0.5 需求1：下拉框候选项。同样挂在这个每帧主线程入口上（自己带 1.2 秒节流与
+                // 「选项界面正在渲染」的标记判定），玩家没打开选项页时每帧只多一次 bool 判断。
+                DropdownL10n.Tick();
+
                 // 需求6：快捷键轮询。同样挂在这个每帧主线程入口上（框架不会替你回调绑定事件），
                 // 复用上面的退出闸门与 try/catch；玩家没绑键时每帧只多两次 null 判断。
                 Mod.PollHotkeys();
@@ -1650,11 +1948,24 @@ namespace Cs2AutoTranslator
                 if (!HookEnabled) return true;        // 总开关关闭：放行原文（需求8）。
                 if (Paused) return true;              // 需求2：刚清除缓存 → 暂停期保持原文，不重新入队翻译。
                 if (key == null || data == null) return true;
-                // 不翻译本模组自己的选项文字（已由 L10n 12 语言表 / SelfL10n 按游戏语言渲染）。
-                if (key.IndexOf("Cs2AutoTranslator", StringComparison.Ordinal) >= 0) return true;
+                // v1.0.5 需求1：看见 Options.* 来取词，说明选项界面正在渲染 —— 给下拉框扫描器置个标记，
+                // 让它把这一页所有下拉框的候选项一次性入队（不用等玩家点开下拉框）。
+                // 这里只有一次前缀比较 + 一次 volatile 赋值，符合 §10 第 9 条对热路径的要求。
+                if (DropdownL10n.Want == false) DropdownL10n.NoteKeyRequested(key);
+
+                // 不翻译本模组自己的选项文字 —— 但只在目标语言是那 12 种官方界面语言之一时（那时 L10n/SelfL10n
+                // 已经按游戏语言出好了手写文案，再机翻只会把 "DeepL" 翻成"深度链接"这类品牌名）。
+                // v1.0.5 需求2：目标语言在这 12 种之外时【不再拦】—— 全屏都成了小语种、只有本模组的设置页还是
+                // 英语，玩家点名要这一格也翻。判据与下拉框那条链共用 DropdownKit.SkipSelfKey（两处必须同一条）。
+                if (DropdownKit.SkipSelfKey(key, TargetLocale)) return true;
 
                 // 范围过滤（需求2）：未勾选的类目直接放行原文，不翻不标记。
-                Scope.Category cat = Scope.Classify(key);
+                // v1.1.3 性能：这里改用 Scope.ClassifyMemo —— 同一条判据，只是把 key→类目 记进小缓存。
+                // 这一次钩子是【每一次界面取词】都跑（进一趟选项页就是成百上千次），而 Classify 里的
+                // IsModIdentifier 要遍历几十条模组 id、ExtractIdentifier 每条都要 Substring 新建一个串。
+                // 顺序【没有】动（先类目、后字典、再缓存命中），所以"关掉某档范围就不再显示旧译文"这条
+                // 行为一字不变；缓存会在模组 id 表换了一份时整体作废，不会把新模组永久钉成游戏本体。
+                Scope.Category cat = Scope.ClassifyMemo(key);
                 if (!ScopeEnabled(cat)) return true;
 
                 LocalizationDictionary dict = GameManager.instance?.localizationManager?.activeDictionary;
@@ -1711,6 +2022,922 @@ namespace Cs2AutoTranslator
         }
     }
 
+    // ===== v1.0.5 需求1：下拉框候选项文字 =====
+    // 玩家报的现象：选项页的标题/说明都翻好了，唯独下拉框里（含收着时显示的那一项）还是外语。
+    // 根因与"延时动作"有关但比它更靠后（下面三条都有 decompiled 源码行号为证，判据本身在 DropdownKit.cs）：
+    //   ① 候选项数组是【建页那一刻】从 itemsAccessor / enumMembers 取走的快照，之后 Update() 只在
+    //      itemsVersion() 变了才重取，而绝大多数选项行没有 [SettingsUIValueVersion] ⇒ 版本永远是 0
+    //      ⇒ 这一次快照就是最后一次（DropdownField.cs:63-86、EnumField.cs:44-66、AutomaticSettings.cs:510-518）。
+    //   ② OptionsUISystem.RefreshPage() 只重跑 UpdateVisibility / UpdateNameAndDescription / UpdateWarning，
+    //      从不重取 items ⇒ 本模组原来那条"有新译文就 RefreshPage"的通路对下拉框内容无效。
+    //   ③ 前端 JS 只从 C# 拿到 {id, value, args} 三元组（LocalizedString.Write 原样序列化），
+    //      取词是 cohtml 的 SWIG director 打进 UILocalizationManager.Translate 的；它按 id 缓存过一次，
+    //      晚一秒落地的译文它看不见。
+    // 对策（不依赖任何 JS 侧未证实的行为）：模组自己在 C# 侧把这一项的 displayName 换成
+    // LocalizedString.Value(成品译文) —— id 为空 ⇒ 前端不再查字典、原样上屏 —— 再调公开的
+    // Widget.SetPropertiesChanged() 逼这个控件下一帧重发 props（Widget.cs:76、161-187）。
+    // 时机：Prefix 每看见一次 Options.* 取词就知道选项界面正在渲染，置 Want 标记；本类据此
+    // ①在界面打开时把所有下拉框的候选项一次性入队（不等玩家点开），②之后每轮把落地的译文写回控件。
+    // 只在主线程跑（要遍历 ECS 系统与控件），所有异常一律吞掉：最坏结果是"下拉框没翻"，不影响其它翻译。
+    internal static class DropdownL10n
+    {
+        // 一个候选项对象 → 我们替它记的账。键是控件里的 item 实例本身，所以游戏随时换掉整批候选项
+        // （重建页、换引擎重取列表）时，新对象自然查不到记录、按第一次见到处理 —— 不需要维护控件清单，
+        // 也不会因为我们持有引用而拖住游戏对象不放（弱表）。
+        sealed class Origin
+        {
+            public LocalizedString Original;   // 建页时那一份原样 LocalizedString，关翻译时逐字段还原
+            public string Source;              // 待翻源文本（null = 暂时/永久不归我们管，看 Retry）
+            public bool Retry;                 // Source 为 null 只是因为暂时性失败（字典没就绪/查不到）⇒ 下一轮再看一次
+            public string Applied;             // 我们上一次写进控件的译文（null = 没写过）
+            public string AppliedLocale;       // 那句译文是翻成哪种语言的
+        }
+
+        // 控件类型 → 反射元数据。下拉框控件的类型总数是个位数（DropdownField<string>/<int>、EnumField、
+        // FlagsField + 其它模组的自定义控件），所以这张表不会长大，也不需要清理。
+        sealed class Meta
+        {
+            public System.Reflection.PropertyInfo List;   // items / enumMembers
+            public System.Reflection.PropertyInfo DisplayName;   // 元素类型上的 displayName
+            public System.Reflection.MethodInfo SetChanged;      // Widget.SetPropertiesChanged()
+            public string Name;                             // 只用于日志
+        }
+
+        static readonly Dictionary<Type, Meta> s_meta = new Dictionary<Type, Meta>();
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Origin> s_origins =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, Origin>();
+
+        // 控件 → 「这一栏整体是什么用途」（v1.1.2）。判一次记住一次：判据要把整栏文字读一遍（十几次反射），
+        // 每 1.2 秒对 101 个控件各来一遍就是白烧主线程。弱表 ⇒ 游戏重建控件时新对象自然重新判，不漏不误。
+        // （包一层 class 是因为 ConditionalWeakTable 的 TValue 必须是引用类型，enum 直接放不进去。）
+        sealed class ColumnVerdict
+        {
+            public DropdownKit.ColumnKind Kind;
+            public ColumnVerdict(DropdownKit.ColumnKind kind) { Kind = kind; }
+        }
+
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, ColumnVerdict> s_columns =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<object, ColumnVerdict>();
+
+        // ===== 选项行的标题与说明（v1.1.3，玩家点名 Real Weather Sync / Plop the Growables 整页英文）=====
+        // 一个 NamedWidget 有【两处】文字：displayName（这一行的名字）与 description（下面那行小字说明）。
+        // 每一处都要单独记住"模组原来是什么"，因为我们可能已经把控件里那句话换成中文了 ——
+        // 没有这份快照就分不清"是模组自己改的"还是"是我们写的"，也就没法安全还原。
+        // 弱表 ⇒ 游戏重建选项页时新对象自然重判、旧对象随 GC 走（与候选项那两张表同一个套路）。
+        sealed class RowSlot
+        {
+            public bool Seen;                        // 见过才计数，免得每 1.2 秒把统计刷大
+            public bool Tried;                       // 解析过一次源文本没有（永久拿不到的那种不再每轮白查字典）
+            public bool HasAction;                   // 模组是用 action 动态给值的吗
+            public Func<LocalizedString> Action;     // 【模组自己的】action（控件上那份可能已经被我们换成常量）
+            public LocalizedString Original;         // 模组原来那句话（id 与英文兜底 value 都在里面）
+            public string Source;                    // 解析出的待翻源文本；null = 不归我们管
+            public bool Retry;                       // 只是暂时拿不到（字典没就绪/查不到）⇒ 下一轮再解析
+            public string Applied;                   // 我们写进去的译文（null = 没写过）
+            public string AppliedLocale;             // 那句译文是翻成哪种语言的
+        }
+
+        sealed class RowState
+        {
+            public RowSlot Name;
+            public RowSlot Desc;
+        }
+
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<NamedWidget, RowState> s_rows =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<NamedWidget, RowState>();
+
+        internal static volatile bool Want;             // Prefix 置位：选项界面正在渲染，该扫一轮了
+        static volatile bool s_EverOptions;             // 这一局里玩家是否曾经打开过选项页（没打开过就没必要走这棵树）
+        static int _lastTick;
+        static int _lastLogTick;
+        static string _lastActivePage;            // 上一轮扫描时游戏记着的活动页（v1.1.4 的换页触发条件）
+        // 这一轮是不是【整棵树还原扫描】（v1.1.5，只由 RevertAll / RevertOutOfScope 在玩家点击或保存那一下置位）。
+        // 扫描只在主线程跑（Tick / Patches.EnsureApplied / 按钮回调），所以一枚普通 bool 就够，
+        // 不需要 Interlocked —— 但它必须在 Scan 退出时清掉，所以下面用 try/finally 成对写。
+        static bool s_Sweep;
+        static bool s_FirstScanLogged;                  // 第一次看到控件：无条件打一行统计（实机验证的证据）
+        static bool s_WalkWarned;                       // 控件遍历出异常只说一次，够定位就行，不刷日志
+
+        const int ScanIntervalMs = 1200;   // 与 RefreshUi 的 1.5s 节流同量级：一轮扫描的实际收益就是几行文字
+        const int LogIntervalMs = 8000;    // 统计行最多 8 秒一条，免得挂着省略号时每轮刷一行
+
+        // Prefix 热路径调用：只做一次前缀比较 + 一次赋值，无反射无 IO（§10 第 9 条）。
+        public static void NoteKeyRequested(string key)
+        {
+            if (Want) return;
+            if (key.StartsWith("Options.", StringComparison.Ordinal)) { Want = true; s_EverOptions = true; }
+        }
+
+        // 每帧主线程入口（Patches.EnsureApplied 里调，与 WorldLabels.Tick / PollHotkeys 同一挂点）。
+        // v1.1.4：触发条件从"游戏在取 Options.* 的词"这一条变成两条 ——
+        //   ① 照旧：Want（Prefix 看见 Options.* 来取词 ⇒ 选项界面正在渲染）；
+        //   ② 新增：活动页【换过】。为什么必须有②：扫描面收窄到一页之后，"玩家切到另一个页"就成了
+        //      唯一的重新触发点，而有些模组的页整页标题/说明都是裸文字兜底（一个 Options.* key 都不取，
+        //      见 §10 第 79 条），那时①永远不会置位 ⇒ 切过去的页永远不翻。
+        //      这一探测每 1.2 秒最多一次，且只读两枚缓存过的字段（不碰控件树），
+        //      还在 s_EverOptions 为假时直接返回 ⇒ 从没开过选项页的局里代价为零（§10 第 81 条：
+        //      周期热路径上只做与"有没有变化"有关的事）。
+        public static void Tick()
+        {
+            int now = Environment.TickCount;
+            if (now - _lastTick < ScanIntervalMs) return;
+            _lastTick = now;
+            if (!Want)
+            {
+                if (!s_EverOptions) return;
+                if (ActivePageNow() == _lastActivePage) return;      // 页没换 ⇒ 确实没活，什么都不做
+            }
+            DropdownKit.Tally t = Scan("选项界面渲染中");
+            // 扫不动（还没进过世界 / 游戏改版拿不到系统）或这一轮没有任何欠账就别空转，等下一次取词请求再试。
+            if (t == null || t.Idle) Want = false;
+        }
+
+        // 有新译文落地 / 改了设置 / 重打补丁之后由 Patches.RefreshVisibleText 顺带调一次。
+        // 这是"译文写进控件"的主路径：后台线程翻好一条 → 1.5s 内刷一次界面 → 下拉框跟着一起换。
+        public static void ScanIfOptionsSeen(string reason)
+        {
+            if (!s_EverOptions) return;      // 这局还没开过选项页：一棵没有控件的树不值得走
+            Scan(reason);
+        }
+
+        // ===== v1.1.5：把我们写进控件的译文【全部】放回原文（不受活动页限制）=====
+        // 为什么必须有这一条（玩家 2026-10-02 报的「清除了缓存后模组界面的文本仍然是日文，
+        // 并在很短时间内变回了中文，这是不是说明缓存没清干净？」）：
+        //   ① 缓存确实清干净了 —— 实机凭据是 20:22:44 那两行「已清空内存译文表并删除磁盘缓存文件」
+        //      与紧跟的「预载 0 条历史译文进内存表」，内存表、待追加队列、磁盘文件三处都空；
+        //   ② 玩家眼睛看见的日文不在任何缓存里，而是【我们写进控件对象】的那句
+        //      （DropdownField 的 item.displayName / NamedWidget 的 displayName/description）。
+        //      游戏把这些对象一直养在选项页树里，只有我们的扫描再去把它们改回来；
+        //   ③ 而"改回来"这件事 v1.1.4 起只走【当前打开的那一页】—— 收窄送翻面的副作用正好咬在还原这一侧。
+        //      实机凭据（同一局）：20:22:36 那一条是 AccessAnarchy 页「上屏=주차장…」（韩语），
+        //      20:22:44 玩家清代之后日志里【一行 [下拉框] 都没有】，第一条要到 20:22:47 才出现，
+        //      而那一条的活动页已经换成 ToolModeMemory（「退回原文 60」），AccessAnarchy 那一页
+        //      从此落在「整页跳过 23 页」里 —— 玩家再点回去之前，那几处韩语会一直挂着。
+        //      他报的"仍然是日文，很短时间后变回中文"就是这个：眼前这一页 1.2~3 秒后被补还原了，
+        //      其它页根本没被还原。
+        // 所以还原必须走整棵树，而且只在玩家明确按下那一下走（不是周期任务 —— §10 第 81 条那条规矩
+        // 针对的是每帧/每 1.2 秒那种热路径；一次点击换一轮全树，代价与 v1.0.5 每 1.2 秒一轮比可以忽略）。
+        // 走整棵树时【一条新活都不排】、也【不是我们写的地方一眼都不多看】（见 s_Sweep 那两处早退），
+        // 所以这一轮的开销只与"我们写过多少处"有关，与树有多大无关。
+        // 下面两个档位（玩家 2026-10-02 追问「把所有页上这一档的译文都切回去，性能影响大不大」之后加的第二个）：
+        //   RevertAll        —— 玩家说"这些译文我全不要"：清代 / 关总开关 / 重新翻译。把 enabled 当假，
+        //                       Decide 于是只可能给 Restore 或 Skip。
+        //   RevertOutOfScope —— 玩家只关掉某一档「翻译范围」：enabled 照实读，只有【已出范围】的那几处退回原文，
+        //                       玩家还想留着的那一档不无辜回退（否则下次重翻就是白烧额度）。
+        // 两者共用同一轮扫描、同一条"不排新活"闸门（DropdownKit.MayEnqueue），差别只在 forceOff 那一格。
+        static int _lastSweepTick;
+        const int SweepDebounceMs = 1500;   // 与 ScanIntervalMs 同量级：一次点击串起 SaveNow→ClearCacheNow 两个入口，别扫两遍
+
+        private static void Sweep(string reason, bool forceOff)
+        {
+            if (!s_EverOptions) return;                          // 这局没打开过选项页 ⇒ 一处都不是我们写的
+            int now = Environment.TickCount;
+            if (now - _lastSweepTick < SweepDebounceMs) return;   // 同一次点击触发的第二次还原没有意义（第一次已经走完）
+            _lastSweepTick = now;
+            Scan(reason, true, forceOff);
+        }
+
+        // ① "整体不要"：清除缓存 / 关总开关 / 重新翻译 —— 我们写过的每一处都放回原文，一条新活都不排。
+        public static void RevertAll(string reason) { Sweep(reason, true); }
+
+        // ② "只退被我关掉的那一档"：勾掉某一档「翻译范围」之后（范围开关一改就走 SaveNow，见 TranslatorSetting.OnLiveSettingChanged）。
+        // 这一种【不能】把 enabled 当假：那会把玩家还想留着的那些译文一起退回原文、下一次还得重翻（白烧额度）。
+        // 所以走真实开关值，只让 Decide 把【现在已归"范围外"而我们写过的那几处】退掉；
+        // 排队那一格由 DropdownKit.MayEnqueue 单独挡死 ⇒ 整棵树这一次不会把 v1.1.4 的收窄顶穿。
+        // 开销与①完全同级，而且更小：真实的写入只发生在"刚被关掉那一档"的几处上，
+        // 其余每一处的代价是一次弱表查询 + 一个 Applied 判空（连反射读属性都不做）。
+        public static void RevertOutOfScope(string reason) { Sweep(reason, false); }
+
+        // ===== 「玩家现在打开的是哪一页」=====（v1.1.4 需求1）
+        // 这个值游戏自己记着，就在它私有字段里，我们只是去读：
+        //   OptionsUISystem.m_ActivePageBinding ：ValueBinding<string>，.value = 当前页 id
+        //     （decompiled OptionsUISystem.cs:584 建绑定；:900 `m_ActivePageBinding.Update(page?.id ?? string.Empty)`；
+        //      :488 `pages` 是 Dictionary<string,Page>，键就是同一个 page.id ⇒ 可以直接和 pe.Key 比）
+        //   OptionsUISystem.m_SearchQuery       ：string（:454）。搜索时 :1011 那一格让游戏把【所有命中页】
+        //     一起重算，所以那一刻我们也该全扫 —— 判据必须和游戏同一格，不能我们自己发明。
+        // 反射按 §10 第 81 条只解析一次并缓存。任何一步拿不到 ⇒ known=false ⇒ 调用方退回"整棵树都扫"：
+        // 游戏改版时宁可多扫，也绝不能变成"玩家打开了页也不翻"（用户 2026-10-02：不能影响功能的正常使用）。
+        private static FieldInfo _activePageFi;
+        private static FieldInfo _searchQueryFi;
+        private static PropertyInfo _bindingValuePi;
+        private static bool _gateSearched;
+
+        private static void ReadPageGate(object sys, out string activePage, out bool searching, out bool known)
+        {
+            activePage = null; searching = false; known = false;
+            if (sys == null) return;
+            try
+            {
+                if (!_gateSearched)
+                {
+                    _gateSearched = true;
+                    const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
+                    Type st = sys.GetType();
+                    _activePageFi = st.GetField("m_ActivePageBinding", F);
+                    _searchQueryFi = st.GetField("m_SearchQuery", F);
+                    object b = _activePageFi == null ? null : _activePageFi.GetValue(sys);
+                    if (b != null) _bindingValuePi = b.GetType().GetProperty("value");
+                    if (_activePageFi == null || _bindingValuePi == null)
+                        ModLog.Warn("[选项页] 读不到游戏记的「当前打开的是哪一页」（字段名多半随版本改了）："
+                                    + "扫描退回旧行为＝整棵树都扫。翻译功能不受影响，只是没打开的页也会送去翻译。");
+                }
+                if (_activePageFi == null || _bindingValuePi == null) return;      // known=false ⇒ 全扫
+                object binding = _activePageFi.GetValue(sys);
+                if (binding == null) return;
+                activePage = _bindingValuePi.GetValue(binding, null) as string;
+                searching = _searchQueryFi != null && !string.IsNullOrEmpty(_searchQueryFi.GetValue(sys) as string);
+                known = true;
+            }
+            catch (Exception ex)
+            {
+                known = false;                                                     // 读失败 ⇒ 宁多扫不漏扫
+                ModLog.Warn("[选项页] 读活动页异常（本轮退回整棵树扫描）: " + ex.Message);
+            }
+        }
+
+        // 「现在打开的是哪一页」的可比较编码。⚠ ActivePageNow()（Tick 的换页探测）与 Scan() 必须都走这一个函数，
+        // 编码不一致会让"页换没换"每轮都判定成换了 ⇒ 扫描停不下来（正是本文件反复警告过的那种空转）。
+        static string PageKeyOf(string activePage, bool searching, bool known)
+        {
+            if (!known) return null;                                   // 读不到 ⇒ 不参与换页判定（Scan 自己会全扫）
+            if (string.IsNullOrEmpty(activePage)) return searching ? "(搜索中)" : "(无)";
+            return searching ? activePage + "+搜索" : activePage;
+        }
+
+        // 每 1.2 秒最多一次（Tick 的换页探测）：向 ECS 要一次已有的系统实例 + 读两枚缓存过的字段，不碰控件树。
+        static string ActivePageNow()
+        {
+            string a; bool s, k;
+            ReadPageGate(Patches.GetOptionsSystem(), out a, out s, out k);
+            return PageKeyOf(a, s, k);
+        }
+
+        // ===== 一轮扫描（返回 null = 这轮根本没扫成，调用方据此决定要不要继续要下一轮） =====
+        static DropdownKit.Tally Scan(string reason) { return Scan(reason, false, false); }
+
+        // fullSweep=true = v1.1.5 的整棵树扫描（只由 RevertAll / RevertOutOfScope 触发）：
+        //   ① 每一页都走（DropdownKit.ShouldVisitPage 那一格直接给 true）；
+        //   ② forceOff=true ⇒ enabled 一律当成"翻译已经关了"⇒ Decide 只可能给 Restore / Skip；
+        //      forceOff=false（只退"刚被关掉的那一档范围"）⇒ 用真实开关值，但 Enqueue 仍被
+        //      DropdownKit.MayEnqueue 挡死，所以一条新活都不会排进队列；
+        //   ③ s_Sweep 让候选项/选项行两处对"不是我们写的地方"一眼都不多看。
+        // 传 (false, false) 就是 v1.1.4 那一版的行为，一个字没改。
+        static DropdownKit.Tally Scan(string reason, bool fullSweep, bool forceOff)
+        {
+            var t = new DropdownKit.Tally();
+            t.Sweep = fullSweep;
+            bool ok = false;
+            bool outerSweep = s_Sweep;
+            s_Sweep = fullSweep;
+            try
+            {
+                if (Mod.IsTearingDown()) return null;
+                object sys = Patches.GetOptionsSystem();
+                if (sys == null) return null;
+                IDictionary pages = Patches.ReadObj(sys, "pages") as IDictionary;
+                if (pages == null) return null;
+
+                ok = true;
+                LocalizationDictionary dict = null;
+                try { dict = GameManager.instance?.localizationManager?.activeDictionary; } catch { }
+                bool dictReady = dict != null;          // 「没拿到字典」和「字典里没有这条」是两回事，分开报（DropdownKit.SourceMiss）
+                // v1.1.5：还原扫描有两种 —— ①"整体不要"把 enabled 一律当假（把我们写过的全放回原文），
+                // ②"只退刚关掉那一档范围"用真实开关值（玩家还想留着的译文不许退，退了就是白烧额度）。
+                bool enabled = Patches.HookEnabled && !Patches.Paused && !(fullSweep && forceOff);
+                string target = Patches.TargetLocale;
+                string active = Patches.ActiveLocale;
+                // 「这一轮要不要拦我们自己的文案」整轮只算一次（Normalize 要建串，400 项每条都算太浪费）：
+                // 目标语言在官方 12 语之内 ⇒ 用手写表、拦；之外 ⇒ 本模组自己的下拉框候选项也照翻。
+                // 这一格与 Patches.Prefix 里的 DropdownKit.SkipSelfKey 是同一条判据（那里逐条算，这里整轮算一次）。
+                bool guardSelf = LanguageCatalog.IsOfficialUiLocale(target);
+
+                // ===== v1.1.4 需求1：这一轮只处理玩家【真正打开的那一页】 =====
+                // 判据不在我们这边发明 —— 抄游戏自己的 OnUpdate（decompiled OptionsUISystem.cs:1011）：
+                //   `if (!string.IsNullOrEmpty(m_SearchQuery) || m_ActivePageBinding.value == value.id)`
+                //   才对那一页重跑 UpdateNameAndDescription / UpdateVisibility。
+                // 为什么以前不这么干：v1.0.5 起这条链一直把整棵树扫完，理由是"控件建页时就全部存在，
+                // 顺手一起翻省事"。省事的是我们，代价由玩家的额度与耐心付：2026-10-02 16:00:01 那一行
+                // 是「页 56 / 分区 103 / 选项行文字 2084 处 / 新入队 46+294」，1.4 秒后撞上 429、
+                // 旧退避让 5 条 worker 一起歇 20 秒 ⇒ 玩家看到的是"开了翻译半天没动静，过一会才开始"。
+                string activePage; bool searching; bool activeKnown;
+                ReadPageGate(sys, out activePage, out searching, out activeKnown);
+                // 日志那一格要能直接回答"为什么这一页没翻"：读不到（游戏改版）与"游戏还没选中任何页"
+                // （面板从没开过）是两种完全不同的处置，别让它们都印成空串。
+                t.ActivePage = !activeKnown ? "(读不到→按旧行为全扫)"
+                              : searching ? (string.IsNullOrEmpty(activePage) ? "(搜索中)" : activePage + "+搜索")
+                              : string.IsNullOrEmpty(activePage) ? "(游戏还没选中任何页)" : activePage;
+                t.Budget = DropdownKit.ScanEnqueueBudget;
+                // 记下"这一轮看的是哪一页"，供 Tick 的换页探测比较（同一个编码函数，见 PageKeyOf）。
+                _lastActivePage = PageKeyOf(activePage, searching, activeKnown);
+
+                foreach (DictionaryEntry pe in pages)
+                {
+                    object page = pe.Value;
+                    if (page == null) continue;
+                    string pageKey = pe.Key == null ? null : pe.Key.ToString();
+                    if (!DropdownKit.ShouldVisitPage(fullSweep, pageKey, activePage, searching, activeKnown))
+                    {
+                        t.SkippedPages++;          // 整页没打开 ⇒ 一处都不看、一条都不排，也根本不进这一页的树
+                        continue;
+                    }
+                    t.Pages++;
+                    IList sections = Patches.ReadObj(page, "sections") as IList;
+                    if (sections == null) continue;
+                    // 样例日志里要能看出"这一项在哪个页"（pe.Key 是页的本地化 key，如 Options.SECTION[Graphics]）：
+                    // 只有分类计数时"字典查不到 106"没法定位，配上页名才知道是游戏自己的页还是某个模组的页。
+                    string pageTag = "页:" + (pageKey == null ? "?" : pageKey);
+                    // v1.1.1：这一页是官方的还是某个模组的？判据只看 key 形状 —— 官方页是裸词
+                    // （实机出现过的就 General / Graphics / Interface），模组的页是「模组名.分区.…」点分串
+                    // （ToolModeMemory.ToolModeMemory.ToolModeMemoryMod、MapExt2.MapExtPDX.Mod.EconomyEX）。
+                    // 页归属只用来给【key 形状判不出类目】的候选项定范围（Scope.ClassifyItem），
+                    // 官方页里的东西一律照旧归游戏本体。
+                    bool pageIsMod = pe.Key != null && pe.Key.ToString().IndexOf('.') >= 0;
+                    int secNo = 0;
+                    foreach (object section in sections)
+                    {
+                        IList options = section == null ? null : Patches.ReadObj(section, "options") as IList;
+                        if (options == null) continue;
+                        if (options.Count > 0) t.Sections++;
+                        secNo++;
+                        string where = pageTag + " 区" + secNo;
+                        foreach (object option in options)
+                        {
+                            // 读的是 Option.widget 这个自动属性（不是 SettingItemData.widget 那种懒建属性）。
+                            // ⚠ 但"没建过的页才是 null"这句在本版已被实测推翻：官方 OptionsUISystem.RegisterSetting
+                            //   在建页时就 BuildPage() → 对【每一个标签页】BuildTab() → 里面直接取 item.widget（懒建属性），
+                            //   所以模组一注册选项，全部标签页的控件就已经存在了。⇒ 其它标签页天然在这一轮扫描范围内，
+                            //   不需要等玩家点开（实机凭据：日志里那行的「页 / 分区」两个数，一个标签页 = 一个分区）。
+                            object widget = option == null ? null : Patches.ReadObj(option, "widget");
+                            if (widget != null) WalkWidget(widget, dict, dictReady, guardSelf, enabled, target, active, t, where, pageTag, pageIsMod);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { ModLog.Warn("[下拉框] 扫描异常（不影响其它翻译）: " + ex.Message); }
+            finally { s_Sweep = outerSweep; }   // 上面有三条 return null 的早退路 ⇒ 复位必须放在 finally
+
+            LogScan(t, ok, reason);
+            return ok ? t : null;
+        }
+
+        // 日志口径：① 这一局【第一次】真的看到下拉框控件时无论如何打一行 —— 那一行写着"扫到几个控件、
+        // 多少项、其中几项翻了/几项为什么不翻"，实机验证只需要这一行就能判断成没成，玩家把它发回来就能对症。
+        // ② 之后只在"有动静"时打，且最快 8 秒一条（初始那批译文是一条条落地的，不节流就会每 1.2 秒刷一行）。
+        static void LogScan(DropdownKit.Tally r, bool ok, string reason)
+        {
+            if (!ok) return;
+            if (r.Widgets == 0 && !r.Sweep) return;           // 一个候选项容器都没看到（还没进过选项页）不值得刷屏
+
+            bool first = !s_FirstScanLogged;
+            // v1.1.5：moved 这一格以前只看候选项那三个数，于是【只动选项行】的那一轮在日志里完全不留痕。
+            // 玩家报「清了缓存界面还是日文」时，20:22:44 那一刻日志里恰好就一行 [下拉框] 都没有 ——
+            // 我们因此无法回答"还原到底跑没跑、跑了几个"，只能靠推理。补齐这一格的口径。
+            // Sweep 那一轮无论如何都打：一次点击才有一轮，不会刷屏，而它正是这一版要的实机凭据。
+            bool moved = r.Applied > 0 || r.Restored > 0 || r.Enqueued > 0
+                         || r.RowApplied > 0 || r.RowRestored > 0 || r.RowEnqueued > 0;
+            int now = Environment.TickCount;
+            if (!first && !moved && !r.Sweep) return;
+            if (!first && !r.Sweep && now - _lastLogTick < LogIntervalMs) return;
+            s_FirstScanLogged = true;
+            _lastLogTick = now;
+            // 第一次那一行多带一段诊断：页/分区数（= 其它标签页有没有被扫到）+ 没取到源文本的六类原因。
+            // 之后不再打，免得每次刷新界面都刷两行长文本。
+            ModLog.Info("[下拉框] " + r.Line() + (first ? r.Diag() + " " : "")
+                        + (string.IsNullOrEmpty(reason) ? "" : "原因：" + reason));
+            // 第一次那一行后面再补一行样例（每类最多 3 条、共 24 条）：分类计数只说"有多少项卡在哪儿"，
+            // 样例说"那些项长什么样"。2026-09-29 追 AccessAnarchy 的下拉框时，靠的就是真 key 的形状
+            // （mode.access 这种小写点分 key，官方 22,163 条 key 里一条都没有）才定到位。
+            // ⚠ 现在【每一轮打出统计行的时候】都带上样例，不再只打第一次：v1.1.0 只打第一次，于是
+            // 「写入译文」这类【后来才发生】的动作在日志里永远没有样本，玩家说"没翻"时无从对质。
+            if (!first)
+            {
+                string s2 = r.Samples();
+                if (s2.Length > 0) ModLog.Info("[下拉框] " + s2);
+            }
+            else
+            {
+                string s = r.Samples();
+                if (s.Length > 0) ModLog.Info("[下拉框] " + s);
+                // 分页明细（只在第一次打）：哪个模组的哪一页有几项、各自卡在哪一格。
+                // 玩家报的永远是"某某模组那个框"，按页归拢的这一行才能一行对上号。
+                string pd = r.PagesDetail();
+                if (pd.Length > 0) ModLog.Info("[下拉框] " + pd);
+            }
+        }
+
+        // ===== 单个控件 =====
+        static void WalkWidget(object widget, LocalizationDictionary dict, bool dictReady, bool guardSelf, bool enabled,
+                               string target, string active, DropdownKit.Tally t, string where, string pageTag, bool pageIsMod)
+        {
+            try
+            {
+                // ===== v1.1.3：先处理这一行的【标题与说明】=====
+                // 为什么放在 MetaOf 之前：候选项那套只认得下拉框控件（Meta 拿不到就 return），
+                // 而标题/说明挂在 NamedWidget 上 —— 复选框、滑块、按钮这些【没有候选项列表】的行
+                // 同样是 NamedWidget。玩家报的"整页英文、连说明都不翻"就出在这一层。
+                if (widget is NamedWidget nw)
+                {
+                    string rowAt = t.WantsSamples ? where + " " + widget.GetType().Name : null;
+                    HandleRowText(nw, true, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
+                    HandleRowText(nw, false, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
+                }
+
+                Meta m = MetaOf(widget.GetType());
+                if (m == null) return;
+                Array list = m.List.GetValue(widget, null) as Array;
+                if (list == null || list.Length == 0) return;
+
+                t.Widgets++;
+                t.Items += list.Length;
+                bool changed = false;
+                // 样例里带上控件类型（EnumField / DropdownField`1 …）：同一页里两种控件的取值口径不一样，
+                // "哪个值送去翻才会正确显示"这个问题只能靠它来回答。⚱ 只在还要抓样例时才拼这个串
+                // （本函数每 1.2 秒对 71 个控件各跑一次，白建串就是白占用主线程）。
+                string at = t.WantsSamples ? where + " " + widget.GetType().Name : null;
+                // 分页明细那一行（DropdownKit.Tally.PageRow）：按【页】归拢，不看控件也不看分区，
+                // 玩家报"某某模组的下拉框没翻"时，这一行直接给出那一页卡在哪一格。
+                DropdownKit.Tally.PageRow row = t.Row(pageTag);
+
+                // ===== v1.1.2：整栏用途先看一眼 =====
+                // 「选择语言」和「数字档位」这两栏是【故意一条都不翻】的（玩家 2026-10-01 点名，实机凭据
+                // 是那句把 Français 翻成"英语"的日志）。判据与反射分开：DropdownKit.ClassifyColumn 是纯函数，
+                // 离线表 X 段直接钉；这里只做"读一栏文字"和"记账"。
+                ColumnVerdict verdict;
+                if (!s_columns.TryGetValue(widget, out verdict))
+                {
+                    verdict = new ColumnVerdict(DropdownKit.ClassifyColumn(ColumnTexts(list, m)));
+                    s_columns.Add(widget, verdict);
+                }
+                if (DropdownKit.SkipWholeColumn(verdict.Kind))
+                {
+                    bool isLang = verdict.Kind == DropdownKit.ColumnKind.LanguagePicker;
+                    if (isLang) t.LangWidgets++; else t.TimeWidgets++;
+                    if (row != null) row.Items += list.Length;
+                    if (at != null)
+                        t.Sample("整栏不翻", at + " 用途=" + (isLang ? "选择语言" : "数值档位")
+                                 + " 共" + list.Length + "项 例子=" + Probe.Trunc(JoinExamples(list, m, 3), 90));
+                    return;     // 一条都不碰，也不给控件发属性变更（免得白刷一帧）
+                }
+
+                for (int i = 0; i < list.Length; i++)
+                {
+                    object item = list.GetValue(i);
+                    if (item == null) continue;
+                    if (StepOnItem(item, m, dict, dictReady, guardSelf, enabled, target, active, t, at, pageIsMod, row)) changed = true;
+                }
+
+                if (changed && m.SetChanged != null) m.SetChanged.Invoke(widget, null);
+            }
+            catch (Exception ex)
+            {
+                // 单个控件失败只影响它自己：游戏改版最可能只改一种控件，别让整轮扫描跟着停。
+                // 只报第一次（这轮之后每一轮都会撞上同一个控件，重复报只是刷屏）。
+                if (!s_WalkWarned)
+                {
+                    s_WalkWarned = true;
+                    ModLog.Warn("[下拉框] 处理控件 " + widget.GetType().Name + " 异常（同类只报这一次，不影响其它翻译）: " + ex.Message);
+                }
+            }
+        }
+
+        // ===== 一处选项行文字（标题或说明）=====
+        // 为什么必须有这一条（v1.1.3，玩家点名 Real Weather Sync 与 Plop the Growables「整页英文、连说明都不翻」）：
+        // 这一层文字不走 UILocalizationManager.Translate —— 模组给的是
+        // LocalizedString.IdWithFallback(key, "英文原句") 或 LocalizedString.Value("英文原句")
+        // （一手凭据：decompiled Game/UI/Menu/AutomaticSettings.cs:348/365 官方自己就这么建，
+        //  LocalizedString.cs:64-72 的 IdWithFallback 同时带 id 和 value），前端看见 value 非空就直接上屏。
+        // 所以我们挂在 Translate 上的钩子对这类文字【一次都没被调用过】—— 实机凭据：10-02 那一局
+        // 同一页里标题有 7 条 [懒翻译]、dll 里那些说明句一条都没进过日志。
+        // 判据与候选项那一套完全共用（ResolveRowSource / Decide / IsSafeToDisplay + Scope 的类目与本地预筛），
+        // 只有【写哪里】不同：这里写 NamedWidget，而且模组可能是用 action 动态给值的 ——
+        // 那种情况换掉 action（模组原来那个存在 RowSlot 里），还原时放回去，
+        // 于是"跟着档位变的标题"不会因为我们翻过一次就永久冻死。
+        static void HandleRowText(NamedWidget w, bool isName, LocalizationDictionary dict, bool dictReady,
+                                  bool guardSelf, bool enabled, string target, string active,
+                                  DropdownKit.Tally t, string at, bool pageIsMod)
+        {
+            RowState st;
+            bool have = s_rows.TryGetValue(w, out st);
+            // v1.1.5 还原扫描：这一行我们一处都没写过 ⇒ 连 RowSlot 都不建、属性都不读，直接返回。
+            // 全树要过的槽位是 2084 处（v1.1.4 实机那一行），其中我们真写过的通常只有几处到几十处 ⇒
+            // 这一轮的开销只与"我们写过多少处"有关，与树有多大无关（§10 第 81 条那条规矩的正解）。
+            if (s_Sweep && (!have || !RowTouched(st, true) && !RowTouched(st, false))) return;
+            if (!have) { st = new RowState(); s_rows.Add(w, st); }
+            if (isName) { if (st.Name == null) st.Name = new RowSlot(); }
+            else { if (st.Desc == null) st.Desc = new RowSlot(); }
+            RowSlot s = isName ? st.Name : st.Desc;
+            if (s_Sweep && s.Applied == null) return;        // 标题写过、说明没写过那种：另一半也别多看
+
+            // ---- 第一次见到这一处：抓模组的原样 ----
+            if (!s.Seen)
+            {
+                s.Seen = true;
+                Func<LocalizedString> act = isName ? w.displayNameAction : w.descriptionAction;
+                s.HasAction = act != null;
+                s.Action = act;
+                LocalizedString orig = s.HasAction ? CallAction(act) : (isName ? w.displayName : w.description);
+                if (orig.isEmpty) return;         // 这一行根本没有这句话（多数控件没有说明）：不计数、不翻
+                s.Original = orig;
+                t.Rows++;
+            }
+            if (s.Original.isEmpty) return;
+
+            // ---- 没有 action 的行：模组/别的模组可能自己把这句话换掉了 ----
+            // 只有【我们没写过】时才承认"控件里现在这句就是新的原文"。我们写过的时候控件里挂的就是我们的译文，
+            // 拿它当原文会把译文再翻一遍（本类所有动作的前提都是"只有我们改过的才归我们还原"，同 StepOnItem）。
+            if (!s.HasAction && s.Applied == null)
+            {
+                LocalizedString now = isName ? w.displayName : w.description;
+                if (!now.Equals(s.Original)) { s.Original = now; s.Source = null; s.Tried = false; s.Retry = true; }
+            }
+
+            // ---- 解析待翻源文本（暂时性失败留到下一轮，永久拿不到的不再白查字典）----
+            if (s.Source == null && (!s.Tried || s.Retry))
+            {
+                s.Tried = true;
+                DropdownKit.SourceMiss miss;
+                string dictValue = Lookup(dict, s.Original.id);
+                s.Source = DropdownKit.ResolveRowSource(s.Original.id, s.Original.value, dictValue,
+                                                        dictReady, guardSelf, out miss);
+                s.Retry = miss == DropdownKit.SourceMiss.DictNotReady || miss == DropdownKit.SourceMiss.NotInDict;
+                if (miss == DropdownKit.SourceMiss.FallbackValue) t.RowFallback++;
+                if (at != null && (s.Source != null || miss == DropdownKit.SourceMiss.NotInDict
+                                               || miss == DropdownKit.SourceMiss.NoId))
+                    t.Sample("选项行" + miss, at + (isName ? " 标题" : " 说明")
+                             + " id=" + Probe.Trunc(s.Original.id ?? "(无)", 40)
+                             + " 兜底=" + Probe.Trunc(s.Original.value ?? "(无)", 30)
+                             + " 成品=" + Probe.Trunc(s.Source ?? "(不翻)", 30));
+            }
+            if (s.Source == null) return;
+
+            string tr;
+            bool has = TransMap.TryGetTranslated(s.Source, out tr) && !string.IsNullOrEmpty(tr) && tr != s.Source;
+            bool resolved = TransMap.IsResolved(s.Source);
+            // 范围：先按这一行自己的本地化 key 判类目，key 空（纯兜底值那种）由【页归属】兜底 ——
+            // 与候选项共用 Scope.ClassifyItem 那一条，关掉「模组选项及说明」时这里照样退回原文。
+            bool inScope = Patches.ScopeEnabled(Scope.ClassifyItem(s.Original.id, pageIsMod));
+            int act2 = DropdownKit.Decide(s.Source, has ? tr : null, resolved, s.Applied, enabled, inScope);
+
+            // 换了目标语言：先退回模组原文，再按新语言重新排队（与候选项同一条链）
+            if (DropdownKit.IsStale(s.AppliedLocale, target))
+            {
+                RestoreRow(w, isName, s);
+                s.Applied = null;
+                s.AppliedLocale = null;
+                t.RowRestored++;
+                act2 = DropdownKit.Decide(s.Source, has ? tr : null, resolved, null, enabled, inScope);
+            }
+
+            switch (act2)
+            {
+                case DropdownKit.Apply:
+                    if (!DropdownKit.IsSafeToDisplay(tr)) { t.Unsafe++; return; }
+                    WriteRowValue(w, isName, s, tr);
+                    s.Applied = tr;
+                    s.AppliedLocale = target;
+                    t.RowApplied++;
+                    if (at != null)
+                        t.Sample("选项行写入", at + (isName ? " 标题" : " 说明")
+                                 + " id=" + Probe.Trunc(s.Original.id ?? "(无)", 36)
+                                 + " 源=" + Probe.Trunc(s.Source, 22) + " → 上屏=" + Probe.Trunc(tr, 22));
+                    return;
+
+                case DropdownKit.Restore:
+                    RestoreRow(w, isName, s);
+                    s.Applied = null;
+                    s.AppliedLocale = null;
+                    t.RowRestored++;
+                    return;
+
+                case DropdownKit.Enqueue:
+                    if (resolved) return;
+                    // 与 Prefix / 候选项同一套本地预筛：纯数字、键位串、已是目标语言 ⇒ 记成无需翻译，不联网
+                    if (Scope.ShouldSkipLocal(s.Source, target, active)) { TransMap.ResolveAsSkip(s.Source); t.RowSkipped++; return; }
+                    // v1.1.5：整树扫描那一轮一条新活都不排（判据与候选项那一格共用 DropdownKit.MayEnqueue）。
+                    if (!DropdownKit.MayEnqueue(s_Sweep)) { t.Deferred++; return; }
+                    // v1.1.4 需求1：与候选项共用同一本预算（限流算的是总请求数，分两本等于预算翻倍）。
+                    // 源文本已经解析好并存在 RowSlot 里，所以下一轮直接走到这一格排队，不重查字典。
+                    if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return; }
+                    TransMap.Enqueue(s.Source);
+                    t.RowEnqueued++;
+                    return;
+
+                case DropdownKit.Keep:
+                    t.RowKept++;
+                    return;
+
+                case DropdownKit.Skip:
+                    if (!inScope) t.RowOutOfScope++; else t.RowSkipped++;
+                    return;
+            }
+        }
+
+        // 这一行的这一半【是不是我们写过的】（v1.1.5 还原扫描用的那把便宜闸门：没写过就一眼都不多看）。
+        static bool RowTouched(RowState st, bool isName)
+        {
+            RowSlot s = isName ? st.Name : st.Desc;
+            return s != null && s.Applied != null;
+        }
+
+        // 把译文写进 NamedWidget：有 action 就换 action（模组那个存在 RowSlot 里，随时放得回去），
+        // 没有 action 才直接写属性 —— ⚠ 写属性这个 setter 会把 displayNameAction 置 null
+        // （NamedWidget.cs:22-38），所以绝不能在有 action 的行上走这条路，否则动态标题就永久冻住了。
+        static void WriteRowValue(NamedWidget w, bool isName, RowSlot s, string text)
+        {
+            LocalizedString v = LocalizedString.Value(text);
+            if (s.HasAction && s.Action != null)
+            {
+                if (isName) w.displayNameAction = () => v; else w.descriptionAction = () => v;
+                w.UpdateNameAndDescription(true);      // 让游戏重算并广播 props（公开方法，decompiled NamedWidget.cs:57）
+            }
+            else
+            {
+                if (isName) w.displayName = v; else w.description = v;
+                w.SetPropertiesChanged();
+            }
+        }
+
+        // 还原成模组原来那句话（关翻译 / 关范围 / 换目标语言 / 译文不合格时走这里）
+        static void RestoreRow(NamedWidget w, bool isName, RowSlot s)
+        {
+            if (s.HasAction && s.Action != null)
+            {
+                if (isName) w.displayNameAction = s.Action; else w.descriptionAction = s.Action;
+                w.UpdateNameAndDescription(true);
+            }
+            else
+            {
+                if (isName) w.displayName = s.Original; else w.description = s.Original;
+                w.SetPropertiesChanged();
+            }
+        }
+
+        // 模组的 action 是别人写的代码：出错只当这句没有，绝不让选项页扫描跟着炸。
+        static LocalizedString CallAction(Func<LocalizedString> f)
+        {
+            if (f == null) return default(LocalizedString);
+            try { return f(); } catch { return default(LocalizedString); }
+        }
+
+        // 返回 true = 这一项被改写过（调用方据此决定要不要让控件重发 props）。
+        static bool StepOnItem(object item, Meta m, LocalizationDictionary dict, bool dictReady, bool guardSelf, bool enabled,
+                               string target, string active, DropdownKit.Tally t, string at, bool pageIsMod,
+                               DropdownKit.Tally.PageRow row)
+        {
+            bool changed = false;
+            object boxed = m.DisplayName.GetValue(item, null);
+            if (!(boxed is LocalizedString cur))
+            {
+                t.NotItem++;
+                if (at != null) t.Sample("元素形状不符", at + " 元素=" + (boxed == null ? "null" : boxed.GetType().Name));
+                return false;   // 元素形状和游戏对不上（改版），报出来而不是静默吞掉
+            }
+
+            Origin o;
+            bool firstSight = !s_origins.TryGetValue(item, out o);
+            // v1.1.5 还原扫描：这一项不是我们写进去的（没见过 / 写过但已被游戏或别的模组换掉）⇒ 一眼都不多看。
+            // 全树那一轮要过的候选项是几百到上千项，而"我们写过的"只有几项到几十项 ——
+            // 少了这道闸，还原扫描的开销就与控件树大小成正比（§10 第 81 条）。
+            if (s_Sweep && (firstSight || o.Applied == null)) return false;
+            if (firstSight)
+            {
+                o = new Origin { Original = cur };
+                s_origins.Add(item, o);
+                if (row != null) row.Items++;   // 分页明细只数【第一次见到】的项：扫描每 1.2 秒跑一轮，
+                                                 // 重复计数会让"这一页几项"随时间无限膨胀，那行日志就没法读了。
+            }
+            else if (cur.id != null && cur.id != o.Original.id)
+            {
+                // 游戏自己把这一项的文字换掉了（换了档位的候选列表、或别的模组动了它）：记录重抓。
+                o.Original = cur;
+                o.Source = null;
+                o.Retry = true;
+                o.Applied = null;
+                o.AppliedLocale = null;
+            }
+            else if (cur.id == null && o.Applied != null && cur.value != o.Applied)
+            {
+                // 控件里挂着一句【不是我们写的】裸文字：可能是游戏直接赋了成品值。
+                // 记不清就不要再往里写，避免跟别的模组抢同一行文字（本类所有动作的前提是"只有我们改过的才归我们还原"）。
+                o.Applied = null;
+                o.AppliedLocale = null;
+            }
+
+            // 解析待翻源文本。⚠ 只有【可能翻盘的那几种失败】才留到下一轮重试：
+            //   · "字典没拿到"（GameManager 还没就绪／主菜单里那一轮）和"字典查不到"（词典是分批装进来的）
+            //     是暂时性的 ⇒ Retry=true；
+            //   · "没有 key"（游戏故意显示裸文字：语言列表的母语名、我们的模型 slug）、"是我们自己的文案"、
+            //     "命中值只有一个字符" 是永久性的 ⇒ 不再看它，免得每轮白查几百次字典。
+            // 这一格在 2026-09-27 真咬过一口：第一次扫描时字典还没就绪，448 项被一次性判死，
+            // 后面即使就绪也再没回来过（那局 10:11 那一行的 55 项全来自游戏重建的新对象，不是重试来的）。
+            if (o.Source == null && (firstSight || o.Retry))
+            {
+                DropdownKit.SourceMiss miss;
+                string dictValue = Lookup(dict, cur.id);
+                o.Source = DropdownKit.ResolveSource(cur.id, dictValue, dictReady, guardSelf, out miss);
+                o.Retry = miss == DropdownKit.SourceMiss.DictNotReady || miss == DropdownKit.SourceMiss.NotInDict;
+                if (firstSight)
+                {
+                    t.Count(miss);
+                    if (row != null)
+                    {
+                        switch (miss)
+                        {
+                            case DropdownKit.SourceMiss.Ok: row.Dict++; break;
+                            case DropdownKit.SourceMiss.LiteralId: row.Literal++; break;
+                            case DropdownKit.SourceMiss.NotInDict: row.NotInDict++; break;
+                            case DropdownKit.SourceMiss.NoId: row.NoId++; break;
+                            case DropdownKit.SourceMiss.SelfKey: row.SelfKey++; break;
+                            case DropdownKit.SourceMiss.TooShort: row.TooShort++; break;
+                        }
+                    }
+                    // 每类抓 3 条真 key（DropdownKit.Tally.Sample 限量）：光有分类数判不了案，
+                    // 看到 "key=mode.access 值=Access zones only" 这种形状才知道该改哪一层。
+                    // id 是 LocalizedString.id、值是当前语言字典里的那条、成品=我们真正会写回控件的那句。
+                    // ⚠ LiteralId 那一桶里 字典=(查不到) 而 成品=id 本身 —— 这正是 v1.1.1 放开的那条出口。
+                    if (at != null)
+                        t.Sample(miss.ToString(), at + " id=" + Probe.Trunc(cur.id ?? "(无)", 40)
+                                 + " 字典=" + Probe.Trunc(dictValue ?? "(查不到)", 30)
+                                 + " 成品=" + Probe.Trunc(o.Source ?? "(不翻)", 30));
+                }
+            }
+
+            if (o.Source == null) return false;     // 不归我们管：自己的文案 / 裸文字项 / 字典里查不到的键名形状
+
+            string tr;
+            bool has = TransMap.TryGetTranslated(o.Source, out tr) && !string.IsNullOrEmpty(tr) && tr != o.Source;
+            bool resolved = TransMap.IsResolved(o.Source);
+            // 范围开关：先按这一项自己的本地化 key 分类，key 形状判不出来（模组的裸文字 id）时由【页归属】兜底
+            // —— 详见 Scope.ClassifyItem 那段：这是 v1.1.1 与"裸文字送翻"必须同时落地的另一半，
+            // 少了它，这些项解开了一道闸又撞上下一道（玩家普遍没勾「游戏本体」，本机实测 ScopeGameCore=false）。
+            bool inScope = Patches.ScopeEnabled(Scope.ClassifyItem(o.Original.id, pageIsMod));
+            int act = DropdownKit.Decide(o.Source, has ? tr : null, resolved, o.Applied, enabled, inScope);
+
+            // 换了目标语言：先把旧语言的译文退回原文，再按新语言重新排队（DropdownKit 不看语言，所以这一步在这做）。
+            if (DropdownKit.IsStale(o.AppliedLocale, target))
+            {
+                Write(m, item, o.Original);
+                o.Applied = null;
+                o.AppliedLocale = null;
+                t.Restored++;
+                changed = true;
+                act = DropdownKit.Decide(o.Source, has ? tr : null, resolved, null, enabled, inScope);
+            }
+
+            switch (act)
+            {
+                case DropdownKit.Apply:
+                    // 空串/整串空白/超长（引擎把整段说明当一句回回来的跑飞结果）绝不上屏 ——
+                    // 往 non-nullable string writer 里塞 null 就是 §10 第 15c 条那次整帧崩溃的形状。
+                    if (!DropdownKit.IsSafeToDisplay(tr)) { t.Unsafe++; return changed; }
+                    Write(m, item, LocalizedString.Value(tr));
+                    o.Applied = tr;
+                    o.AppliedLocale = target;
+                    t.Applied++;
+                    if (row != null) row.Applied++;
+                    // 「写入译文」这一桶样例是 v1.1.1 的实机验收凭据：日志说写了、写的是哪一句、玩家眼睛里的
+                    // 下拉框是不是那一句 —— 三件事在同一行里对得上，才能回答"前端有没有按新 props 重绘"
+                    // 这个离线钉不住的问题（交接文档 §7 T4）。
+                    if (at != null)
+                        t.Sample("写入译文", at + " id=" + Probe.Trunc(o.Original.id ?? "(无)", 36)
+                                 + " 源=" + Probe.Trunc(o.Source, 24) + " → 上屏=" + Probe.Trunc(tr, 24));
+                    return true;
+
+                case DropdownKit.Restore:
+                    Write(m, item, o.Original);
+                    o.Applied = null;
+                    o.AppliedLocale = null;
+                    t.Restored++;
+                    return true;
+
+                case DropdownKit.Enqueue:
+                    if (resolved) return changed;
+                    // 与 Prefix 完全相同的本地预筛：纯数字/键位串/已是目标语言 → 记成"无需翻译"，不联网、不占队列。
+                    if (Scope.ShouldSkipLocal(o.Source, target, active)) { TransMap.ResolveAsSkip(o.Source); t.Skipped++; return changed; }
+                    // v1.1.5：整树扫描那一轮【一条新活都不排】（两种扫描都要守这一条：
+                    // "整体不要"那种 enabled 已经是假、走不到这里；"只退关掉那一档范围"那种走真实 enabled、
+                    // 真会走到这里 —— 不挡就把 55 个没打开的页一次塞进队列，v1.1.4 的收窄当场作废）。
+                    // 记进 Deferred 而不是静默丢弃：正常扫描下一轮会照排（那一轮才受 24 条预算管）。
+                    if (!DropdownKit.MayEnqueue(s_Sweep)) { t.Deferred++; return changed; }
+                    // v1.1.4 需求1：本轮的送翻预算用完了 ⇒ 这一项【什么都不动】地留给下一轮。
+                    // 关键在于"不动"：不 mark 已处理、不写控件、不进队列，所以 1.2 秒后同一条判据会原样再走一遍。
+                    // Deferred 让 Tally.Idle 为假 ⇒ Want 不被清 ⇒ 这一页一定会被排完（不会"只翻了前 24 条"）。
+                    if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return changed; }
+                    t.Pending++;
+                    TransMap.Enqueue(o.Source);
+                    t.Enqueued++;
+                    if (row != null) row.Enqueued++;
+                    return changed;
+
+                case DropdownKit.Keep:
+                    t.Kept++;
+                    return changed;
+
+                case DropdownKit.Skip:      // 判据说"这一项别动"，但【为什么】要分开报：
+                    //   没勾范围开关 ⇒ 是玩家的取舍（范围外）；已经知道不需要翻（本地预筛命中/三次判死）⇒ 跳过。
+                    // 2026-09-29 那一局 405 项里凭空少了 150 项，就是因为这一格以前什么都不计，
+                    // 七个动作全 0 又"看着正常"，白绕了一局才定位到「游戏本体」没勾。
+                    if (!enabled || !inScope) t.OutOfScope++;
+                    else t.Skipped++;
+                    if (!enabled || !inScope) { if (row != null) row.OutOfScope++; }
+                    if (at != null && (!enabled || !inScope))
+                        t.Sample("范围外", at + " id=" + Probe.Trunc(o.Original.id ?? "(无)", 40)
+                                 + " 源=" + Probe.Trunc(o.Source, 30)
+                                 + "（总开关=" + (enabled ? "开" : "关") + " 这一类范围=" + (inScope ? "勾了" : "没勾") + "）");
+                    return changed;
+            }
+            return false;   // 走到这里 = 游戏改版多出一个我们没认得的处置码：什么都不做，别猜
+        }
+
+        static void Write(Meta m, object item, LocalizedString value)
+        {
+            m.DisplayName.SetValue(item, value, null);
+        }
+
+        // 读一栏候选项的文字，供整栏用途判定（v1.1.2）。上限 32 项 —— 语言列表最长也就 40 来项，
+        // 判定用的是比例，取前 32 项足够稳，又不会让某个巨大的模组列表把主线程拖住。
+        // 取词口径与 StepOnItem 完全一致：id 优先（模组把显示文字塞进 id 的那类），id 空才看 value。
+        static List<string> ColumnTexts(Array list, Meta m)
+        {
+            var names = new List<string>(Math.Min(list.Length, 32));
+            int cap = Math.Min(list.Length, 32);
+            for (int i = 0; i < cap; i++)
+            {
+                object item = list.GetValue(i);
+                if (item == null) { names.Add(null); continue; }
+                object boxed = m.DisplayName.GetValue(item, null);
+                if (!(boxed is LocalizedString ls)) { names.Add(null); continue; }
+                names.Add(!string.IsNullOrEmpty(ls.id) ? ls.id : ls.value);
+            }
+            return names;
+        }
+
+        // 日志样例里那一栏的前几条文字（只给样例用，读三条就够看清"这栏是干什么的"）。
+        static string JoinExamples(Array list, Meta m, int count)
+        {
+            var sb = new StringBuilder();
+            int cap = Math.Min(list.Length, count);
+            for (int i = 0; i < cap; i++)
+            {
+                object item = list.GetValue(i);
+                if (item == null) continue;
+                object boxed = m.DisplayName.GetValue(item, null);
+                if (!(boxed is LocalizedString ls)) continue;
+                string s = !string.IsNullOrEmpty(ls.id) ? ls.id : ls.value;
+                if (string.IsNullOrEmpty(s)) continue;
+                if (sb.Length > 0) sb.Append(" / ");
+                sb.Append(s);
+            }
+            return sb.ToString();
+        }
+
+        // 查当前语言字典。I18NEverywhere 这类模组 patch 了 TryGetValue，所以这里拿到的人工译文优先，
+        // 与 Prefix 同一份取值口径。⚠ 返回 null（查不到）现在【不再等于"这一项不翻"】：
+        // 游戏在字典查不到时把 key 原样上屏（decompiled UILocalizationManager.cs:27），所以那串 id 本身就是
+        // 玩家看见的文字。要不要拿它当源文本由 DropdownKit.LooksLikeDisplayText 按形状判（键名形状仍不翻）。
+        static string Lookup(LocalizationDictionary dict, string id)
+        {
+            if (dict == null || string.IsNullOrEmpty(id)) return null;
+            try { return dict.TryGetValue(id, out string v) ? v : null; }
+            catch { return null; }
+        }
+
+        // ===== 反射元数据（按控件类型缓存） =====
+        static Meta MetaOf(Type t)
+        {
+            if (s_meta.TryGetValue(t, out Meta m)) return m;
+            m = Build(t);
+            s_meta[t] = m;          // null 也记下来：不是下拉框的控件占一个槽，避免每轮重新反射一遍
+            return m;
+        }
+
+        static Meta Build(Type t)
+        {
+            var mi = new Meta();
+            mi.SetChanged = t.GetMethod("SetPropertiesChanged",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            foreach (string propName in DropdownKit.ListProperties())
+            {
+                System.Reflection.PropertyInfo list = t.GetProperty(propName, BindingFlags.Instance | BindingFlags.Public);
+                if (list == null || !list.CanRead || !list.PropertyType.IsArray) continue;
+
+                Type elem = list.PropertyType.GetElementType();
+                if (elem == null) continue;
+
+                System.Reflection.PropertyInfo dn = elem.GetProperty("displayName", BindingFlags.Instance | BindingFlags.Public);
+                if (dn == null || !dn.CanWrite || dn.PropertyType != typeof(LocalizedString)) continue;
+                if (!DropdownKit.ElementLooksLikeAnItem(dn.Name, dn.PropertyType.Name)) continue;
+
+                mi.List = list;
+                mi.DisplayName = dn;
+                mi.Name = t.Name + "." + propName;
+                return mi;
+            }
+            return null;
+        }
+    }
+
     // ===== 运行时译文表：以「源文本」为键（天然去重、跨 key 复用、I18N 改值会重翻新值）。=====
     internal static class TransMap
     {
@@ -1719,7 +2946,9 @@ namespace Cs2AutoTranslator
         private static readonly ConcurrentDictionary<string, byte> Queued = new ConcurrentDictionary<string, byte>();   // 入队去重
         // 反馈5：两条队列，不是一条。进大城市存档时路名/区名动辄几千条，全和玩家刚点开的那块面板挤在同一条
         // FIFO 上，于是「点得快的话要好久才会翻译好」——面板那几条文字排在整座城市名字的后头。
-        // 现在界面文字走前台，工作线程【只有前台空了】才去捞世界文字；两条队列共用同一套退避与在飞计数。
+        // 现在界面文字走前台，工作线程【只有前台空了】才去捞世界文字；两条队列共用同一个在飞计数。
+        // v1.1.4 改了一句：退避【不再共用】—— 世界洪水撞出来的限流只冻世界那一档，
+        // 前台照常走（判据见 Mod.TranslateLoop 那条链上的 Tier / PushCooldown / WaitForCooldown）。
         private static readonly BlockingCollection<string> Pending = new BlockingCollection<string>(new ConcurrentQueue<string>());
         private static readonly BlockingCollection<string> PendingWorld = new BlockingCollection<string>(new ConcurrentQueue<string>());
 
@@ -1727,6 +2956,33 @@ namespace Cs2AutoTranslator
         // 所以光看 Pending.Count==0 会在「最后一条还堵在网上」时误判排空，把首批刷新提前发出去。
         // 不变式：Take 取走一条 → +1；这条最终走到 SetTranslation / ResolveAsSkip / Requeue 之一 → −1。
         private static int _inFlight;
+
+        // 在飞计数只减到 0 为止（v1.1.5）。为什么不能直接用 Interlocked.Decrement：
+        // TransMap.Reset()（保存设置 / 清缓存 / 重新翻译都会走它）把这一格清零，而【清零那一刻已经出发】的
+        // 请求回来时照样要还这一笔 ⇒ 旧写法会把计数压成负数，而 IsIdle 判的是 `== 0` ⇒
+        // 从那一刻起本局再也不会出现"真的排空了"，世界文字那套"等队列空了再刷"的判据跟着一起失效。
+        // 取舍：宁可少算（早刷一次界面，只是多一次 cohtml 回调），也不能算成负数（永远等不到排空，有害）。
+        private static void DecrementInFlight()
+        {
+            for (int cur = Volatile.Read(ref _inFlight); cur > 0; cur = Volatile.Read(ref _inFlight))
+                if (Interlocked.CompareExchange(ref _inFlight, cur - 1, cur) == cur) return;
+        }
+
+        // ===== v1.1.5：清代之后回来的那条结果 =====
+        // 只做一件事：把在飞计数还给账本，然后【什么都不写】—— 不写 Translated、不写磁盘缓存
+        //（那正是"清了又长回来"的那只手）、不退回队列（清代时 WorldSources 已被清空，Requeue 会把
+        //  路名错投进前台那一队，把 v1.1.4 好不容易分开的两档又搅在一起），也不碰 Transient/Attempts
+        //  那两本账（这条文本在新代里若还想要，扫描/Prefix 会自己重新 Enqueue）。
+        public static void DropStale(string src)
+        {
+            Interlocked.Increment(ref _staleDropped);
+            DecrementInFlight();
+        }
+
+        // 本局丢弃了多少条"出发在清代之前"的结果 —— 诊断行用它回答"缓存到底清干净了没有"。
+        public static int StaleDropped => Volatile.Read(ref _staleDropped);
+
+        private static int _staleDropped;
 
         // 反馈7：单条文本的失败次数与「本局判死」标记。
         // 过去失败只走全局退避 + 无限重排队：一条永久翻不成的文本（下架的模型、坏掉的占位符）
@@ -1742,6 +2998,15 @@ namespace Cs2AutoTranslator
 
         // 队列空且没有在飞的请求 = 真的闲下来了（反馈6 的首批刷新判据）。两条队列都算。
         public static bool IsIdle => Pending.Count == 0 && PendingWorld.Count == 0 && Volatile.Read(ref _inFlight) == 0;
+
+        // v1.1.4：前台（界面文字）这一队有没有活。冷却分档靠它判 —— 世界文字那场洪水造成的限流
+        // 不该把玩家眼前那一屏一起冻住（用户 2026-10-02 的原话：只有在打开新界面时才判断送翻，
+        // 大量文本是背景活，不能让背景活停住前景活）。
+        public static bool HasFrontWork => Pending.Count > 0;
+
+        // 这条源文本是不是【世界文字】（路名/区名/贴地文字）—— 与 QueueFor 用的是同一本台账，
+        // 所以"走哪条队列"和"该等哪一档冷却"永远是同一个答案。
+        public static bool IsWorldSource(string src) => !string.IsNullOrEmpty(src) && WorldSources.ContainsKey(src);
 
         // 走哪条队列由需求3 那本 WorldSources 台账决定 —— WorldLabelPostfix 在 Enqueue 的【前一行的】
         // MarkWorldSource(src) 刚登记过，所以入队时判据已经就绪，不必多传一个参数。
@@ -1786,16 +3051,46 @@ namespace Cs2AutoTranslator
             GivenUp[src] = 0;
             Attempts.TryRemove(src, out _);
             Queued.TryRemove(src, out _);
-            Interlocked.Decrement(ref _inFlight);
+            DecrementInFlight();
             ModLog.Warn("[重试] 「" + Probe.Trunc(src, 30) + "」第 " + n + " 次没翻成，本局先保留原文"
                         + "（改设置、点保存或按重新翻译都会重试）。");
             return 0;
         }
 
+        // v1.1.2：「这条文本自己翻不成」与「这台机器现在出不去」必须分开记账 —— 这是 ask「下拉框有
+        // 6、7 个选项只翻了一半，而且永远不会自己补齐」的真凶。旧写法里 429/连接失败也走 NoteFailure，
+        // 于是【一次限流风暴就能把一整屏文本各烧掉一次机会】：三条 worker 撞同一堵墙 ⇒ 每条 3 次用完 ⇒ 判死，
+        // 之后不保存、不重翻就再也不试了（2026-10-01 15:08:36 那三条 429 就发生在这条路径上）。
+        // 所以这里给"外部条件造成的失败"另开一条路：原样退回队列，【不碰 Attempts】，只数"被外部条件弹回几次"，
+        // 超过 KMaxTransient 才降级成普通失败（免得一条真翻不成的文本因为一直撞上全局故障而无限循环）。
+        // 返回值 = 这是第几次被弹回（0 = 已降级，调用方按普通失败处理）。
+        private const int KMaxTransient = 12;
+        private static readonly ConcurrentDictionary<string, int> Transient = new ConcurrentDictionary<string, int>();
+
+        public static int NoteTransient(string src)
+        {
+            if (string.IsNullOrEmpty(src)) return 0;
+            int n = Transient.AddOrUpdate(src, 1, (_, v) => v + 1);
+            if (n <= KMaxTransient) { Requeue(src); return n; }
+            Transient.TryRemove(src, out _);
+            return 0;
+        }
+
+        // 成功过一次（或玩家改了设置）就把这本"弹回账"清干净：外部条件恢复后，这些文本应当重新享有完整预算。
+        public static void ForgetTransient(string src)
+        {
+            if (!string.IsNullOrEmpty(src)) Transient.TryRemove(src, out _);
+        }
+
+        public static void ClearTransient() { Transient.Clear(); }
+
+        // 有多少条文本正在被外部条件弹回（诊断行用它区分"还在排队"与"排队排队却因为出口不通原地打转"）。
+        public static int TransientCount => Transient.Count;
+
         public static void Requeue(string src)
         {
             if (string.IsNullOrEmpty(src)) return;
-            Interlocked.Decrement(ref _inFlight);
+            DecrementInFlight();
             try { QueueFor(src).Add(src); } catch { }     // 回哪条队列与入队时同一个判据，别把路名塞回前台
         }
 
@@ -1806,7 +3101,8 @@ namespace Cs2AutoTranslator
             Resolved.TryRemove(src, out _);
             GivenUp.TryRemove(src, out _);
             Attempts.TryRemove(src, out _);
-            Interlocked.Decrement(ref _inFlight);
+            Transient.TryRemove(src, out _);      // 成功过一次 ⇒ 外部条件的弹回账清零（v1.1.2）
+            DecrementInFlight();
             CountIfWorld(src);
         }
 
@@ -1838,7 +3134,8 @@ namespace Cs2AutoTranslator
             Translated.TryRemove(src, out _);
             GivenUp.TryRemove(src, out _);
             Attempts.TryRemove(src, out _);
-            Interlocked.Decrement(ref _inFlight);
+            Transient.TryRemove(src, out _);
+            DecrementInFlight();
         }
 
         // 目标语言/引擎变更后清空内存译文，按新设置重新解析（磁盘缓存命中即时恢复）。
@@ -1851,6 +3148,7 @@ namespace Cs2AutoTranslator
             Attempts.Clear();
             // 反馈7：判死是「本局」的决定，不能跨设置变更留着 —— 玩家换引擎/换语言/按重新翻译就是想再试一次。
             GivenUp.Clear();
+            Transient.Clear();          // v1.1.2：外部条件（限流/出口不通）的弹回账同理，换引擎/修好网络后重新起算
             Interlocked.Exchange(ref _inFlight, 0);
             ClearWorldNew();
             while (Pending.TryTake(out _)) { }
@@ -2346,6 +3644,10 @@ namespace Cs2AutoTranslator
         // 需求10：完全清除翻译缓存（内存 + 磁盘文件），含 "self"（本模组界面机翻）命名空间一并清掉。
         public static void Clear()
         {
+            // v1.1.5：第一件事就是抬代际戳 —— 必须在清内存表【之前】，这样"出发时抄的是旧戳"的那些在飞请求
+            // 回来时一律判定为旧结果（判据见 EngineKit.ResultStillWanted / Mod.FinishOne）。
+            // 晚一步抬的后果是有一条刚好卡在"表已清空、戳还没变"的缝里回写，把刚删的文件又建出来。
+            Interlocked.Increment(ref _clearStamp);
             lock (_fileLock)
             {
                 Dict.Clear();
@@ -2362,6 +3664,15 @@ namespace Cs2AutoTranslator
             }
             ModLog.Info("[缓存] 已清空内存译文表并删除磁盘缓存文件。");
         }
+
+        // ===== 清代际戳（v1.1.5）=====
+        // 「我出发之后玩家清过缓存没有」这一格只有翻译线程用得上，所以戳存在缓存自己这里：
+        // 清一次抬一格（Clear），取一次是一条整数读（ClearStamp）。
+        // 为什么不用时间戳：Environment.TickCount 会 24.8 天回绕，而且"同一毫秒里的两次动作"分不出先后；
+        // 代际号只比相等与否，回绕要 21 亿次清代，本模组活不到那时候。
+        private static int _clearStamp;
+
+        public static int ClearStamp { get { return Volatile.Read(ref _clearStamp); } }
 
         // 用 base64 包裹原文/译文，避免分隔符、换行破坏行格式；引擎名做命名空间，换引擎不会串味。
         // v0.28 修正：base64 尾部补齐符 '=' 会和字段分隔符 '=' 撞车，旧版约 39% 的行被 IndexOf('=') 从中间截断、
@@ -2742,17 +4053,123 @@ namespace Cs2AutoTranslator
 
         private static readonly ConcurrentDictionary<TimeoutWebClient, byte> Live = new ConcurrentDictionary<TimeoutWebClient, byte>();
 
+        // ===== 出口（v1.1.2 的核心修复：本模组连不上翻译服务、别的网络都正常）=====
+        // 2026-10-01 那一局的失败顺序是铁证：15:32:52 先是 `SecureChannelFailure（远程主机关闭了传输流）`，
+        // 15:33:31 起变成 `ConnectFailure（由于目标计算机积极拒绝，无法连接）`，而且【微软、谷歌两条通道同时】
+        // 报同一句 —— 服务端不会两栋楼同时拒一个客户端，"积极拒绝"= TCP SYN 打到一个【没在监听的地址:端口】上。
+        // 唯一能同时解释这两点的：请求根本没直连服务端，而是先交给系统代理（玩家装有 Clash Verge），
+        // 那个代理端口中途停了/换了，于是每一次请求都在本机就被拒，换引擎、换 key 都没用。
+        // ⚠ 但"要不要走系统代理"这件事本模组替玩家决定不了：谷歌网页通道与 DuckDuckGo 在墙内【必须】走代理，
+        //    微软/Azure 直连反而更快。所以做法不是"从此不碰代理"，而是【失败时换一条出口再试一次】：
+        //    默认档（跟随系统代理）连不上 ⇒ 立刻用直连重试；反过来也一样。换档成功后【记住这一档一段时间】
+        //    （EgressStickyMs），免得每条请求都先撞一次坏出口；到期后自动回到默认档重新观察一次，
+        //    这样玩家把代理重新打开时不需要重启游戏。
+        private const int EgressStickyMs = 120000;     // 换档成功后记住 2 分钟
+
+        internal enum Egress { System = 0, Direct = 1 }
+
+        private static int _egress = (int)Egress.System;      // 当前档（0=跟随系统代理，1=强制直连）
+        private static int _egressUntil;                       // 这一档记到什么时候为止（TickCount）
+        private static int _switchLogThrottle;                 // 同类切换日志的节流戳
+
+        // 当前出口档位的中文名（进日志、也进「测试翻译」那句失败原因，让玩家知道是哪一段路不通）。
+        public static string EgressName
+        {
+            get
+            {
+                // 到期就回到默认档（只改静态字段，无锁：读到旧值最多多试一次，不会错）。
+                if (Volatile.Read(ref _egress) != (int)Egress.System && IsTickExpired(_egressUntil))
+                    Interlocked.Exchange(ref _egress, (int)Egress.System);
+                int e = Volatile.Read(ref _egress);
+                return e == (int)Egress.Direct ? "直连" : "系统代理";
+            }
+        }
+
+        // 系统代理现在指向哪里（只取 host:port，绝不打印凭据；拿不到回 null）。日志里这一格是"到底有没有在走代理"
+        // 的唯一凭据 —— 玩家说"我代理早关了"时，这句能直接对上号。
+        public static string ProxyHint()
+        {
+            try
+            {
+                IWebProxy p = WebRequest.DefaultWebProxy;
+                if (p == null) return "(无代理对象)";
+                Uri u = p.GetProxy(new Uri("https://api.cognitive.microsofttranslator.com/"));
+                if (u == null) return "(解析不出)";
+                if (string.Equals(u.Host, "api.cognitive.microsofttranslator.com", StringComparison.OrdinalIgnoreCase))
+                    return "(未走代理)";
+                return u.Host + ":" + u.Port;
+            }
+            catch { return "(读不到)"; }
+        }
+
+        private static bool IsTickExpired(int until)
+        {
+            // Environment.TickCount 会回绕，用差值判最稳（这里只用来判 2 分钟，误差无所谓）。
+            return unchecked(Environment.TickCount - until) >= 0;
+        }
+
+        // 连接层失败：还没拿到任何 HTTP 响应就死了（DNS、TCP 被拒、TLS 握手、读超时）。
+        // 这一类的特征是【换一条文本、换一个引擎都不会好】，所以它不能消耗"这条文本的重试预算"（见 TransMap）。
+        public static bool IsConnectionFailure(Exception ex)
+        {
+            WebException we = ex as WebException;
+            if (we == null) return false;
+            switch (we.Status)
+            {
+                case WebExceptionStatus.ConnectFailure:
+                case WebExceptionStatus.NameResolutionFailure:
+                case WebExceptionStatus.ReceiveFailure:
+                case WebExceptionStatus.SendFailure:
+                case WebExceptionStatus.RequestCanceled:
+                case WebExceptionStatus.Timeout:
+                case WebExceptionStatus.ProxyNameResolutionFailure:
+                case WebExceptionStatus.TrustFailure:              // TLS 证书/握手失败（实机凭据：SecureChannelFailure 就落在这格）
+                case WebExceptionStatus.ConnectionClosed:
+                case WebExceptionStatus.KeepAliveFailure:
+                case WebExceptionStatus.ServerProtocolViolation:
+                    return true;
+                default:
+                    return false;                                   // 含 ProtocolError —— 那是服务端已经答过话（4xx/5xx），换出口没用
+            }
+        }
+
+        // 换到另一档出口，并写一行日志（同类切换 30 秒内只写一次，免得每条请求刷一行）。
+        private static void FlipEgress(Exception cause)
+        {
+            int next = Volatile.Read(ref _egress) == (int)Egress.System ? (int)Egress.Direct : (int)Egress.System;
+            Interlocked.Exchange(ref _egress, next);
+            Interlocked.Exchange(ref _egressUntil, Environment.TickCount + EgressStickyMs);
+            int now = Environment.TickCount;
+            if (unchecked(now - Volatile.Read(ref _switchLogThrottle)) >= 0)
+            {
+                Interlocked.Exchange(ref _switchLogThrottle, now + 30000);
+                ModLog.Warn("[出口] 走「" + (next == (int)Egress.Direct ? "系统代理" : "直连") + "」连不上服务端："
+                            + Probe.Trunc(cause.Message, 120)
+                            + " ⇒ 改用「" + (next == (int)Egress.Direct ? "直连" : "系统代理") + "」重试（系统代理当前指向 "
+                            + (ProxyHint() ?? "?") + "；这一档先记 2 分钟，到期自动回来重新试另一条，不用重启游戏）。");
+            }
+        }
+
         public static WebClient NewClient() => NewClient(0);
 
         // timeoutMs <= 0 用默认档位；AI 引擎传 LlmTimeoutMs。
         public static WebClient NewClient(int timeoutMs)
         {
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
             TuneServicePoints();
             var wc = new TimeoutWebClient { Encoding = Encoding.UTF8 };
             if (timeoutMs > 0) { wc.RequestMs = timeoutMs; wc.ReadMs = timeoutMs; }
             Live[wc] = 0;
             return wc;
+        }
+
+        // 按当前出口档装配代理：直连档显式置 null（WebClient 的默认行为是【跟着系统代理】，不置 null 就换不掉），
+        // 默认档保持不动（跟 WebRequest.DefaultWebProxy 走，代理开关由 Windows 自己管）。
+        private static void ApplyEgress(WebClient wc)
+        {
+            if (Volatile.Read(ref _egress) == (int)Egress.Direct)
+            {
+                try { wc.Proxy = null; } catch { }
+            }
         }
 
         // 反馈5：每条 AI 请求【进生成之前】都有一段跟内容无关的固定开销，三段都是默认值坑：
@@ -2773,6 +4190,15 @@ namespace Cs2AutoTranslator
             _tuned = true;
             try
             {
+                // v1.1.2：TLS 档位从「每次请求都重写成只用 Tls12」改成【只往上加、不覆盖】。
+                // 旧写法是进程级的：本模组一跑，别的模组与游戏自己的 HTTPS 就被限制成只能 Tls12，
+                // 而这份文件第 3237 行早就写下过原则 ——「这三项是【进程级】设置，别的模组也在用同一份，
+                // 所以只做『关掉了额外等待』和『只抬不压』」。TLS 这一项同理：某些端点（含 CDN 换栈后的
+                // 翻译服务）只给 Tls1.3，被我们压成 Tls1.2 就会在握手阶段被掐（实机形状 = SecureChannelFailure）。
+                SecurityProtocolType cur = ServicePointManager.SecurityProtocol;
+                ServicePointManager.SecurityProtocol = cur | SecurityProtocolType.Tls12;
+                try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; }   // Tls13，运行时不认就当没这档
+                catch { }
                 ServicePointManager.Expect100Continue = false;
                 ServicePointManager.UseNagleAlgorithm = false;
                 if (ServicePointManager.DefaultConnectionLimit < kConnectionLimit)
@@ -2800,24 +4226,49 @@ namespace Cs2AutoTranslator
 
         public static string Get(string url, Action<WebClient> headers, int timeoutMs)
         {
-            using (WebClient wc = NewClient(timeoutMs))
-            {
-                if (headers != null) headers(wc);
-                return wc.DownloadString(url);
-            }
+            return Send(headers, timeoutMs, wc => wc.DownloadString(url));
         }
 
         public static string Post(string url, string body, Action<WebClient> headers) => Post(url, body, headers, 0);
 
         public static string Post(string url, string body, Action<WebClient> headers, int timeoutMs)
         {
-            using (WebClient wc = NewClient(timeoutMs))
+            return Send(headers, timeoutMs, wc =>
             {
-                if (headers != null) headers(wc);
                 // 默认按 JSON 发；要发表单的引擎自己在 headers 回调里改成 x-www-form-urlencoded。
                 if (string.IsNullOrEmpty(wc.Headers[HttpRequestHeader.ContentType]))
                     wc.Headers[HttpRequestHeader.ContentType] = "application/json";
                 return wc.UploadString(url, "POST", body);
+            });
+        }
+
+        // 统一的"发一次，连接层不通就换出口再发一次"。⚠ 只对【连接层失败】换档：
+        // 401/403/429/400 都是服务端已经答过话了，换出口重发等于把同一次失败付两遍（额度、限流都是钱）。
+        // 换档后成功 ⇒ 这一档记住 EgressStickyMs（见上面那段实机凭据）；两条路都不通 ⇒ 原样把最后一个异常抛给
+        // 引擎，由引擎记它那条 `[引擎名] 请求失败: …`，判据层再按"连接层失败"处理（不烧这条文本的预算）。
+        private static string Send(Action<WebClient> headers, int timeoutMs, Func<WebClient, string> act)
+        {
+            try
+            {
+                using (WebClient wc = NewClient(timeoutMs))
+                {
+                    ApplyEgress(wc);
+                    if (headers != null) headers(wc);
+                    return act(wc);
+                }
+            }
+            catch (Exception first)
+            {
+                if (!IsConnectionFailure(first)) throw;
+                FlipEgress(first);
+                // 重试这一趟用的是【全新 WebClient】：Headers/Cookie/请求体都由同一个回调重新构造过，
+                // 所以重发不会把上一次半途的头部或已发出的正文带过去。
+                using (WebClient wc = NewClient(timeoutMs))
+                {
+                    ApplyEgress(wc);
+                    if (headers != null) headers(wc);
+                    return act(wc);
+                }
             }
         }
 
@@ -2934,7 +4385,13 @@ namespace Cs2AutoTranslator
         {
             string body = Http.ErrorBody(ex);
             _lastStatus = Http.StatusOf(ex);
-            ModLog.Error("[" + Name + "] 请求失败: " + ex.Message
+            // v1.1.2：连"这次是不是根本没连上服务端"也记一笔，理由与 _lastStatus 完全同源 ——
+            // 「被限流」「账号没余额」「本机出口不通」是三种不同的处置（前两种重试才有意义，第三种要换出口），
+            // 而它们在 ex.Message 里长得很像，只有 WebException.Status 分得开。判据见 Http.IsConnectionFailure。
+            _lastConnectFail = Http.IsConnectionFailure(ex);
+            ModLog.Error("[" + Name + "] 请求失败"
+                + (_lastConnectFail ? "（连接层就没通，当前出口＝" + Http.EgressName + "，系统代理＝" + (Http.ProxyHint() ?? "?") + "）" : "")
+                + ": " + ex.Message
                 + (string.IsNullOrEmpty(body) ? "" : " | 服务端：" + Probe.Trunc(body, 300)));
             return null;
         }
@@ -2943,6 +4400,16 @@ namespace Cs2AutoTranslator
         // [ThreadStatic] 是必须的：并发 worker 各发各的请求，一个全局字段会被别的线程刚写的值盖掉，
         // 于是「A 线程的 429」会被当成「B 线程那条文本」的失败原因，退避判据就全乱了。
         [ThreadStatic] private static int _lastStatus;
+        [ThreadStatic] private static bool _lastConnectFail;
+
+        // 取走并清掉「上一次失败是不是连接层」——与 ConsumeStatus 同一套用法：请求回来后【立刻】取，
+        // 取完即清，否则上一轮的结论会挂在线程上被下一轮误用。
+        public static bool ConsumeConnectFailure()
+        {
+            bool v = _lastConnectFail;
+            _lastConnectFail = false;
+            return v;
+        }
 
         // 第九轮：思考字段该不该发、发成什么形状，只能按玩家选的那个模型名猜（各家文档给的档位集合互相冲突，
         // 而且模型改名、上新之后旧名字就不作数）。猜错就是一个 400，而这一句就永远翻不出来了。
@@ -3185,8 +4652,20 @@ namespace Cs2AutoTranslator
 
     // ===== 免注册通道（需求1：下拉框前四位，开箱即用）=====
 
-    // DuckDuckGo 是两步握手：先 GET /translate 从页面里抠 vqd-4 令牌，再带 x-vqd-4 头 POST。
-    // 令牌是会话级的，拿到就复用；失效（返回空）时丢掉重取一次，两轮都失败才判负。
+    // DuckDuckGo 是两步握手：先 GET /translate 从页面里抠出 vqd 令牌，再 POST /translation.js 真正翻译。
+    // 令牌是会话级的，拿到就复用；返回空/400 时丢掉重取一次，两轮都失败才判负。
+    //
+    // 2026-09-27 修好的一次"假死"：这一档从前被我们标成"当前网络下不通"，实际是三处各自独立的服务端/客户端
+    // 变化叠在一起（逐条实测与复现脚本见交接工作区 state\ddg-probe-2026-09-27\ 与 state\ddg-verify\）：
+    //   · 令牌在页面里写作 vqd="4-…"，老的抠法只认 "vqd-4" 与 vqd=4- ⇒ 永远抠不到（FreeApi.DuckDuckGoVqd 已补）；
+    //   · 翻译正文不在 POST /translate（那个确实 405 nginx），而在 /translation.js?vqd=…&query=translate&to=…；
+    //   · 正文是【裸 UTF-8 原文】而不是 JSON，且响应里的键叫 translated 而不是 translation。
+    //     （老代码发 {"from_lang"…} 那段 JSON 时，它真的把那段 JSON 当英文翻了一遍再回给你。）
+    // 实测口径：连打 30 次全 200、约 0.5 秒一次，没有 429；正文上限 1000 字符（1001 → 400 invalid_text）；
+    // from 参数【没有 "auto" 这个取值】，要给自动检测就得整个省掉（实测省掉时识别准确，日文原文回 detected_language:"ja"）；
+    // 换掉 query= 的值令牌就作废（403）；Content-Type 四种都实测等价，这里写 text/plain 只为语义诚实。
+    // ⚠ 与谷歌那条同一性质：这是搜索结果页前端自用的内部端点，不是公开 API ⇒ 哪天开始回 4xx，
+    //   先怀疑改版、重抓一份样本，不要怀疑玩家的节点，也不要再往这条链上加第三个端点。
     internal sealed class DuckDuckGoEngine : EngineBase
     {
         private static string _vqd;
@@ -3198,22 +4677,32 @@ namespace Cs2AutoTranslator
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
             if (string.IsNullOrEmpty(text)) return null;
-            string from = Lang.DuckDuckGo(SourceLang(fromLocale));
+            // 超长（>1000 字符）服务端直接 400 invalid_text，问了也是白问：说清原因，别让它进"重试三轮"那条链。
+            if (FreeApi.DuckDuckGoTooLong(text))
+            {
+                ModLog.Warn("[DuckDuckGo] 这段超过它 1000 字符的正文上限（本段 " + text.Length
+                            + " 字符），已跳过。界面文案正常都在几十字，出现这条说明有超长的说明文字。");
+                return null;
+            }
             string to = Lang.DuckDuckGo(toLocale);
             try
             {
                 for (int round = 0; round < 2; round++)
                 {
-                    string vqd = _vqd ?? (_vqd = FetchVqd());
+                    string vqd = _vqd;
+                    if (string.IsNullOrEmpty(vqd)) { vqd = FetchVqd(); _vqd = vqd; }
                     if (string.IsNullOrEmpty(vqd)) return null;   // FetchVqd 里已记过日志
-                    string resp = Http.Post(FreeApi.DuckDuckGoTranslateUrl, FreeApi.DuckDuckGoBody(text, from, to), wc =>
+                    string resp = Http.Post(FreeApi.DuckDuckGoUrl(vqd, null, to), FreeApi.DuckDuckGoBody(text), wc =>
                     {
                         BrowserUa(wc);
-                        wc.Headers.Add("x-vqd-4", vqd);
-                        wc.Headers.Add(HttpRequestHeader.Referer, "https://duckduckgo.com/");
+                        wc.Headers[HttpRequestHeader.ContentType] = "text/plain; charset=utf-8";
+                        wc.Headers.Add(HttpRequestHeader.Referer, FreeApi.DuckDuckGoTranslateUrl);
                     });
                     string r = EngineKit.ParseResponse(Name, null, resp);
                     if (!string.IsNullOrEmpty(r)) return r;
+                    // 没译文：把服务端那句 error（invalid_to / invalid_text / …）记下来再换令牌重试，
+                    // 否则日志里只有"两轮都没拿到译文"，下次真改版时对不上号。
+                    ModLog.Info("[DuckDuckGo] 这一轮没有译文：" + (FreeApi.DuckDuckGoError(resp) ?? Probe.Trunc(resp ?? "", 120)));
                     _vqd = null;   // 令牌多半过期了，下一轮重取
                 }
                 ModLog.Error("[DuckDuckGo] 两轮都没拿到译文（令牌或页面结构可能已变）。");
@@ -3222,12 +4711,14 @@ namespace Cs2AutoTranslator
             catch (Exception ex) { _vqd = null; return Fail(ex); }
         }
 
+        // 令牌来自 /translate 那一页（GET /translate 会 302 跟到带 rpl 的页面，跟着跳才拿得到；
+        // WebClient 默认就跟跳转，所以这里不需要自己处理 302）。
         private static string FetchVqd()
         {
             try
             {
                 string v = FreeApi.DuckDuckGoVqd(Http.Get(FreeApi.DuckDuckGoTranslateUrl, BrowserUa));
-                if (string.IsNullOrEmpty(v)) ModLog.Error("[DuckDuckGo] 页面里抓不到 vqd-4 令牌，接口可能已改版。");
+                if (string.IsNullOrEmpty(v)) ModLog.Error("[DuckDuckGo] 页面里抓不到 vqd 令牌，接口可能已改版。");
                 return v;
             }
             catch (Exception ex) { ModLog.Error("[DuckDuckGo] 取令牌失败: " + ex.Message); return null; }
@@ -3259,9 +4750,13 @@ namespace Cs2AutoTranslator
         }
     }
 
-    // Yandex 两条路（用户选的方案）：填了 IAM token 走官方 API，没填走免 key 网页通道。
+    // Yandex 两条路（用户选的方案）：填了 API key 走官方接口，没填走免 key 网页通道。
     // 2026-09-08 实测：/api/v1/tr.json/uuid 已下线，直接 POST /translate 回 {"code":405,"message":"Session is invalid"}，
     // 所以网页通道的 sid/ucid 只能从首页 HTML 里抓。抓不到就明确失败，不瞎猜一个 sid。
+    // 2026-09-27 复核：官方接口那格连不上不是因为 key 不对，而是【主机名整个没了】
+    // （translate.api.yandex.net 已 NXDOMAIN）⇒ 换成活着的老牌 v1.5，见 FreeApi.YandexOfficialUrl；
+    // 免 key 那条依旧死（translate.yandex.net/api/v1/tr.json/translate 无会话时回 403 + "Session is invalid"），
+    // 所以网页通道今天仍然只能等它复活，别把它当可用方案宣传（界面文案 notes.yandex 已经改成"必须填 API key"）。
     internal sealed class YandexEngine : EngineBase
     {
         private static string _sid, _ucid;
@@ -3269,7 +4764,9 @@ namespace Cs2AutoTranslator
 
         public YandexEngine() : base(TranslatorSetting.Engine.Yandex) { }
 
-        public override bool IsConfigured(TranslatorSetting s) => true;   // IAM token 选填
+        // 故意不看 key：留空时还有那条"万一复活"的网页通道可试（MissingField 已经把 key 列成必填，
+        // 玩家点「测试」时会明确收到"还缺必填项：key"，所以这里放过不会让失败变得无声）。
+        public override bool IsConfigured(TranslatorSetting s) => true;
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
@@ -3520,18 +5017,26 @@ namespace Cs2AutoTranslator
     {
         private static string[] _ids = Array.Empty<string>();
         private static float _at = -1f;
+        private static bool _ever;                  // 有没有真的反射过一次（v1.1.3 性能审查修的就是这道闸）
+        private static PropertyInfo _pi;            // ModSetting.instances 是静态属性，反射一次就够
 
-        public static void Invalidate() { _at = -1f; Get(); }
+        public static void Invalidate() { _at = -1f; _ever = false; Get(); }
 
         public static string[] Get()
         {
             float now = UnityEngine.Time.realtimeSinceStartup;
-            if (_ids.Length > 0 && now - _at < 5f) return _ids;
+            // ⚠ 旧写法这里是 `_ids.Length > 0 && now - _at < 5f`：一台机器上【没装别的模组】时 _ids 永远是空数组，
+            // 这道时间闸就永远不成立 ⇒ 每一次 Options.* 取词都重新反射一遍 ModSetting.instances 并新建一个 list。
+            // 那正是 AccessAnarchy 拖慢模拟的同一条模式（"高频路径上做与变化无关的重活"，交接文档 §10 第 79 条），
+            // 只不过这里的代价落在 UI 主线程的取词钩子上。判据改成"反射过一次就按时间走"。
+            if (_ever && now - _at < 5f) return _ids;
             _at = now;
+            _ever = true;
             try
             {
-                PropertyInfo pi = typeof(ModSetting).GetProperty("instances", BindingFlags.NonPublic | BindingFlags.Static);
-                if (pi?.GetValue(null) is IDictionary dict)
+                if (_pi == null)
+                    _pi = typeof(ModSetting).GetProperty("instances", BindingFlags.NonPublic | BindingFlags.Static);
+                if (_pi?.GetValue(null) is IDictionary dict)
                 {
                     var list = new List<string>(dict.Count);
                     foreach (var k in dict.Keys)
@@ -3540,11 +5045,22 @@ namespace Cs2AutoTranslator
                         if (!string.IsNullOrEmpty(s) && s.IndexOf("Cs2AutoTranslator", StringComparison.Ordinal) < 0)
                             list.Add(s);
                     }
-                    _ids = list.ToArray();
+                    // 内容没变就【不要】换新数组：Scope.ClassifyMemo 是按引用判"模组 id 表换过了"的，
+                    // 每 5 秒换一份新数组 = 每 5 秒把整张类目缓存白白作废一次（缓存就等于没有）。
+                    if (!SameSet(_ids, list)) _ids = list.ToArray();
                 }
             }
             catch { /* 反射失败：退化为「无法判别模组」，Options.* 一律归游戏本体（保守，不误翻本体设置）*/ }
             return _ids;
+        }
+
+        // 集合相等（顺序无关）：模组注册顺序会变，但同一批 id 不该被当成"表换了"。
+        private static bool SameSet(string[] a, List<string> b)
+        {
+            if (a.Length != b.Count) return false;
+            for (int i = 0; i < b.Count; i++)
+                if (Array.IndexOf(a, b[i]) < 0) return false;
+            return true;
         }
     }
 
@@ -3573,12 +5089,36 @@ namespace Cs2AutoTranslator
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                RotateIfTooBig();      // 先按大小归档，再写本次会话的头一行
                 File.AppendAllText(FilePath,
                     "\n=== session start " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " ===\n",
                     Encoding.UTF8);
                 PruneOldLogs(); // 需求：日志只保留最近保存的 3 个，更旧的自动清理。
             }
             catch { }
+        }
+
+        // 日志按大小滚动：超过 KMaxLogBytes 就在【本次会话开始前】把它改名成 Cs2AutoTranslator-<时间戳>.log.bak。
+        // 为什么必须有这一格：PruneOldLogs 只负责"多余的归档删掉"，而从前根本没有任何代码产生过 .log.bak
+        // ⇒ 那 3 个名额永远只有当前这一份在用，日志其实是一条无限增长的串
+        // （本机 2026-09-30 实测：30 来局累积 1.6 MB，量不大，但对一个装机几年的玩家是只增不减）。
+        // 滚动之后上界就真成立了：8 MB × 最近 3 份 ⇒ 最坏 24 MB，且旧日志还在（玩家反馈问题时能翻到上一局）。
+        // 文件名必须同时满足 PruneOldLogs 的过滤条件（以 Cs2AutoTranslator 开头、以 .log.bak 结尾），
+        // 否则归档不会被回收 —— 那正是"加了滚动却把上界搞坏"的形状。
+        private const long KMaxLogBytes = 8L * 1024 * 1024;
+
+        private static void RotateIfTooBig()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return;
+                if (new FileInfo(FilePath).Length < KMaxLogBytes) return;
+                string bak = Path.Combine(Path.GetDirectoryName(FilePath),
+                    "Cs2AutoTranslator-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".log.bak");
+                if (File.Exists(bak)) File.Delete(bak);       // 同一秒内重复滚动（玩家反复开关游戏）：覆盖旧的那份
+                File.Move(FilePath, bak);
+            }
+            catch { }   // 滚动失败就用原文件继续写，绝不影响载入
         }
 
         // 只保留最近保存的 3 个日志文件（当前 .log + 最近的 .log.bak 归档），按修改时间倒序，删掉更旧的。

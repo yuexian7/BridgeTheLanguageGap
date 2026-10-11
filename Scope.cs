@@ -553,11 +553,26 @@ namespace Cs2AutoTranslator
         }
 
         // 取语言主码（'-'/'_' 之前、小写）："en-US"→"en"、"zh-HANS"→"zh"、"pt-BR"→"pt"。
+        private static readonly char[] kDashOrUnderscore = { '-', '_' };
+
+        // v1.1.6 性能：两层缓存。目标语言与游戏语言在同一局里各是【同一份字符串】，
+        // IsAlreadyTargetScript 每次都要 BaseLang(target) 与 BaseLang(active) 交替调用，
+        // 旧写法每次都 Substring + ToLowerInvariant 建两个新串，外加 IndexOfAny 的临时数组。
+        // 判等用 ==（引用相等直接短路），两层刚好覆盖那两个交替的串 ⇒ 稳态零分配。
+        // 只在主线程被调（Prefix / WorldLabelPostfix / DropdownL10n.Tick 全是主线程钩子），无需加锁；
+        // 先写值再写 key，杜绝读到"新 key + 旧值"的半套。
+        private static string _baseInA, _baseOutA, _baseInB, _baseOutB;
+
         private static string BaseLang(string locale)
         {
             if (string.IsNullOrEmpty(locale)) return "";
-            int dash = locale.IndexOfAny(new[] { '-', '_' });
-            return (dash > 0 ? locale.Substring(0, dash) : locale).ToLowerInvariant();
+            if (locale == _baseInA) return _baseOutA;
+            if (locale == _baseInB) return _baseOutB;
+            int dash = locale.IndexOfAny(kDashOrUnderscore);
+            string r = (dash > 0 ? locale.Substring(0, dash) : locale).ToLowerInvariant();
+            _baseOutB = _baseOutA; _baseInB = _baseInA;    // 旧的挪到 B（先值后 key）
+            _baseOutA = r; _baseInA = locale;              // 新的放 A（先值后 key）
+            return r;
         }
 
         // 「书写系统 == 目标语言」通用判定：返回 true = 可本地跳过不联网。
@@ -619,53 +634,65 @@ namespace Cs2AutoTranslator
             }
         }
 
+        // v1.1.6 性能：键名表是常量，提前建好一份一直用。
+        // 旧写法把 string[] 写在方法体里 —— 每一条"短纯 ASCII 界面文字"都会重建一次这个
+        // 31 元素数组（选项页一屏几百条 = 几百个数组），而规则②每次取词都跑它。
+        private static readonly string[] kKeyTokens =
+        {
+            "ctrl","control","alt","shift","enter","return","space","tab","esc","escape",
+            "win","cmd","command","mouse","lmb","rmb","mmb","del","delete","ins","insert",
+            "home","end","pgup","pgdn","pageup","pagedown","up","down","left","right","backspace","caps"
+        };
+
+        private static readonly string[] kFKeys =
+        { "f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12" };
+
         // 快捷键启发式：只含 ASCII 字母/数字 + 分隔符，且含已知键名 token，或很短的纯 ASCII 组合。
         private static bool LooksLikeKeyBinding(string text)
         {
             if (text.Length > 24) return false;
-            bool asciiOnly = true;
             bool hasPlusOrCombo = false;
-            foreach (char c in text)
+            for (int i = 0; i < text.Length; i++)
             {
-                if (c > 127) { asciiOnly = false; break; }
+                char c = text[i];
+                if (c > 127) return false;                 // 含非 ASCII → 不是快捷键
                 if (!(char.IsLetterOrDigit(c) || c == ' ' || c == '+' || c == '-' || c == '/' || c == ','))
-                    return false; // 含其它符号（如 '?' '%'）→ 不是纯快捷键，交给别的规则
+                    return false;                          // 含其它符号（如 '?' '%'）→ 不是纯快捷键，交给别的规则
                 if (c == '+' || c == '/') hasPlusOrCombo = true;
             }
-            if (!asciiOnly) return false;
 
-            string lower = text.ToLowerInvariant();
-            string[] keyTokens =
-            {
-                "ctrl","control","alt","shift","enter","return","space","tab","esc","escape",
-                "win","cmd","command","mouse","lmb","rmb","mmb","del","delete","ins","insert",
-                "home","end","pgup","pgdn","pageup","pagedown","up","down","left","right","backspace","caps"
-            };
-            for (int i = 0; i < keyTokens.Length; i++)
-                if (lower.IndexOf(keyTokens[i], StringComparison.Ordinal) >= 0) return true;
-
-            // F1..F12
-            for (int n = 1; n <= 12; n++)
-                if (lower.IndexOf("f" + n.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) >= 0) return true;
+            // v1.1.6：直接 OrdinalIgnoreCase 在原串上找，省掉 ToLowerInvariant 那份字符串拷贝。
+            for (int i = 0; i < kKeyTokens.Length; i++)
+                if (text.IndexOf(kKeyTokens[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            for (int i = 0; i < kFKeys.Length; i++)
+                if (text.IndexOf(kFKeys[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
 
             // 形如 "A"、"Q+E"、"W A S D" 的极短 ASCII 组合。
             if (hasPlusOrCombo) return true;
             string trimmed = text.Trim();
             if (trimmed.Length == 1 && char.IsLetter(trimmed[0])) return true;
 
-            // 空格分隔的键位串（"W A S D"、"Q E R T"）：按空白切开后每个 token 恰好 1 个 ASCII 字母/数字，且至少 2 个 token。
+            // 空格分隔的键位串（"W A S D"、"Q E R T"）：每个 token 恰好 1 个 ASCII 字母/数字，且至少 2 个 token。
             // 刻意【不】放宽到 2~3 字符的 token —— 那样 "to go"、"U S A" 这类真文字会被误判成键位而永远不翻，
-            // 漏翻比多翻一次严重得多。走到这里 text 已保证是纯 ASCII 且只含字母数字与 + - / , 和空白。
-            string[] parts = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length >= 2)
-            {
-                bool everySingleKey = true;
-                foreach (string p in parts)
-                    if (p.Length != 1 || !char.IsLetterOrDigit(p[0])) { everySingleKey = false; break; }
-                if (everySingleKey) return true;
-            }
+            // 漏翻比多翻一次严重得多。走到这里 text 已保证是纯 ASCII 且只含字母数字与 + - / , 和空格
+            //（上面那个循环把制表/换行/其它符号一律 return 掉了），所以按空格就地扫描与 Split 等价，只是不建数组。
+            return SingleCharTokenCount(text) >= 2;
+        }
 
-            return false;
+        // 按空格切分后每个 token 是否都恰好 1 个 ASCII 字母/数字；只要有一个不合格就返回 0（整串不合格）。
+        private static int SingleCharTokenCount(string text)
+        {
+            int tokens = 0, i = 0, n = text.Length;
+            while (i < n)
+            {
+                while (i < n && text[i] == ' ') i++;
+                if (i >= n) break;
+                int start = i;
+                while (i < n && text[i] != ' ') i++;
+                tokens++;
+                if (i - start != 1 || !char.IsLetterOrDigit(text[start])) return 0;
+            }
+            return tokens;
         }
     }
 }

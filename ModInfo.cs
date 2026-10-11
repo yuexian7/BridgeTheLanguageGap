@@ -94,10 +94,29 @@ namespace Cs2AutoTranslator
         ///   玩家还想留着的那一档不无辜回退 = 不白烧额度）+ DropdownKit.MayEnqueue（整树那一轮一条新活都不排，
         ///   否则这一档会顺手把 55 个没打开的页塞进队列、把 v1.1.4 刚收窄的洪水请回来）。
         ///   接入点在 SaveNow：总开关关了走 RevertAll，还开着只是改了设置走 RevertOutOfScope。
-        /// ⚠ 源码与测试表里那些写着「v1.0.5 需求1」「v1.0.5 第四条」的注解，指的都是【这一轮】：它从没以 1.0.5
-        ///   的名义发布过，中途整体抬号成 1.1.0，不是两个版本。别按 1.0.5 去线上找这一轮的改动。
+        /// 1.1.6（2026-10-11，同一个会话，代码审查后的一轮稳定性/性能清理，无新功能、无行为变更）：
+        ///   ① 保存/重新翻译时的「缓存预载」整表扫描 + 逐条 base64 解码移到后台线程：
+        ///     此前它在主线程做，缓存攒到几万条时玩家每按一次快捷键就卡一下；扫描期间
+        ///     玩家又点保存 ⇒ ClearStamp 变了，这批结果按代数作废（与
+        ///     EngineKit.ResultStillWanted 同一判据），不会把旧目标语言的译文写进新设置；
+        ///   ② 引导阶段（Bootstrap 跑在后台工作线程）不再跨线程直接读 GameManager /
+        ///     localizationManager / activeDictionary（Unity/Colossal 原生对象跨线程硬读是
+        ///     偶发、难复现的崩溃来源）：改为主线程每帧探一次、结果抄进托管静态字段，
+        ///     后台线程只等那个字段；Patches.SyncSettings 里那行多余的 ActiveLocale 读取也删了
+        ///     （守护每 2 秒已在主线程刷新它）；
+        ///   ③ 「世界文字强制刷新」加 400ms 节流：保存/清除缓存/重新翻译都走它，而保存是
+        ///     快捷键 0.5 秒可连按的，每一次都清三份渲染缓存 + 重烤 + 可能重读整张语言字典。
+        ///     压得够近的两次合并成一次——【延后，绝不丢】（关掉翻译时玩家指望画面立刻回原文，
+        ///     那一下不能吞），由 Tick() 在退出闸门【之前】补做；
+        ///   ④ 热路径分配：LooksLikeKeyBinding 的 31 元素键名表 + F1~F12 提前建一份复用，
+        ///     找键名改用 OrdinalIgnoreCase（省掉 ToLowerInvariant 那份字符串拷贝），
+        ///     空格分隔键位串改就地扫描（省掉 Split 的数组）；BaseLang 加两层缓存 +
+        ///     IndexOfAny 的临时数组提出来（目标语言/游戏语言在同一局里是同一份串，引用相等即命中）；
+        ///   ⑤ 「获取模型列表」加单飞：连点不会同时起多个请求线程；
+        ///   ⑥ HarmonyId 占位名 com.yourname.* 换成 com.yuexian.*。
+        /// ⚠ 源码与测试表里那些写着「v1.0.5 需求1」「v1.0.5 第四条」的注解，指的都是【1.1.0 那一轮】。
         /// </summary>
-        internal const string kVersion = "1.1.5";
+        internal const string kVersion = "1.1.6";
 
         /// <summary>作者署名。按作者本人要求逐字用 "yuexian"，不是平台账号名 "yuexian7"。</summary>
         internal const string kAuthor = "yuexian";

@@ -51,7 +51,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.5：点「清除缓存」或关掉翻译的那一刻就把【所有页面】上我们写过的文字放回原文——包括你没打开的那几页；清除缓存时还在网络上的那几条译文也不会再把刚清掉的缓存写回来) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.6：保存/重新翻译时缓存预载移到后台线程，主线程不再卡；引导阶段不再让后台线程跨线程读游戏对象；连按快捷键时世界刷新合并成一次；热路径少建临时对象) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -100,9 +100,14 @@ namespace Cs2AutoTranslator
         {
             try
             {
-                // 1) 等本地化管理器就绪。
-                LocalizationManager lm = WaitForLocalizationManager();
-                if (lm == null) { ModLog.Error("[线程] 超时：没等到本地化管理器。"); return false; }
+                // 1) 等本地化管理器就绪（v1.1.6：改为主线程探针 —— Bootstrap 跑在后台工作线程，
+                //    此前在这里直接读 GameManager/localizationManager/activeDictionary，
+                //    而 Unity/Colossal 原生对象跨线程硬读是偶发、难复现的崩溃来源）。
+                _probing = true;
+                ProbeLocalizationOnMainThread();
+                if (!WaitFor(() => Patches.LocalizationReady, 120))
+                { _probing = false; ModLog.Error("[线程] 超时：没等到本地化管理器。"); return false; }
+                _probing = false;
 
                 // 2) 在主线程注册官方选项界面（RegisterInOptionsUI 必须在主线程）。
                 MainThreadDispatcher.RunOnMainThread(() =>
@@ -111,8 +116,8 @@ namespace Cs2AutoTranslator
                     catch (Exception ex) { ModLog.Error("[选项] 注册异常: " + ex); }
                 });
 
-                // 3) 等选项注册完成 + 字典有内容。
-                if (!WaitFor(() => TranslatorSetting.Instance != null && (lm.activeDictionary?.entryCount ?? 0) > 100, 120))
+                // 3) 等选项注册完成（字典有内容已由第 1 步的主线程探针抄进 Patches.LocalizationReady）。
+                if (!WaitFor(() => TranslatorSetting.Instance != null && Patches.LocalizationReady, 120))
                 { ModLog.Error("[线程] 超时：选项界面或本地化字典未就绪。"); return false; }
 
                 // 4) 载入磁盘译文缓存并把「当前引擎+目标语言」命中的历史译文预载进 TransMap（需求9a：
@@ -638,19 +643,45 @@ namespace Cs2AutoTranslator
 
         // 把磁盘缓存里「当前引擎 + 当前目标语言」命中的历史译文，预载进运行时 TransMap（需求9a）。
         // 这样重启后玩家看到的旧译文能立即显示，不必逐条重新显示「…」再翻一遍。
+        // v1.1.6：整表扫描 + 逐条 base64 解码是重活，而本方法同时被「保存设置」
+        //（快捷键/按钮）与「重新翻译」在主线程调用 —— 缓存攒到几万条时玩家每按一次
+        // 快捷键就卡一下。这里只在主线程取一份设置快照，扫描放到后台线程，做完再回
+        // 主线程刷一次界面。
+        // 单飞：连按/连改设置时只保留一轮，欠着的那轮用最新设置重跑（_seedAgain）。
+        // 代数保护：扫描期间玩家又点了保存 ⇒ ClearStamp 变了，这批结果作废
+        //（与 EngineKit.ResultStillWanted 同一判据），否则会把「旧目标语言」的译文
+        // 写进新设置的译文表。
+        private static int _seeding;
+        private static volatile bool _seedAgain;
+
         private static void SeedCacheIntoTransMap()
         {
-            try
+            TranslatorSetting setting = TranslatorSetting.Instance;
+            if (setting == null) return;
+            string engine = TranslationEngines.Get(setting.TranslationEngine).CacheName;
+            string target = setting.TargetLocale;
+            if (Interlocked.CompareExchange(ref _seeding, 1, 0) != 0) { _seedAgain = true; return; }
+            new Thread(() =>
             {
-                TranslatorSetting setting = TranslatorSetting.Instance;
-                if (setting == null) return;
-                string engine = TranslationEngines.Get(setting.TranslationEngine).CacheName;
-                string target = setting.TargetLocale;
-                int n = TranslationCache.SeedTransMap(engine, target);
-                if (n > 0) { _uiDirty = true; RefreshUi(true); }
-                ModLog.Info($"[缓存] 预载 {n} 条历史译文进内存表（引擎={engine} 目标={target}）：重启后即时显示、不再重翻。");
-            }
-            catch (Exception ex) { ModLog.Error("[缓存] 预载失败: " + ex.Message); }
+                try
+                {
+                    int stamp = TranslationCache.ClearStamp;
+                    int n = TranslationCache.SeedTransMap(engine, target, stamp);
+                    if (n >= 0)   // >=0 = 这一轮没被清代打断
+                    {
+                        if (n > 0) { _uiDirty = true; RefreshUi(true); }
+                        ModLog.Info($"[缓存] 预载 {n} 条历史译文进内存表（引擎={engine} 目标={target}）：重启后即时显示、不再重翻。");
+                    }
+                }
+                catch (Exception ex) { ModLog.Error("[缓存] 预载失败: " + ex.Message); }
+                finally
+                {
+                    Interlocked.Exchange(ref _seeding, 0);
+                    // 跑的时候设置又变了：补一轮（用最新设置）。放在释放之后，避免新旧两轮互相踩 _seeding。
+                    if (_seedAgain) { _seedAgain = false; SeedCacheIntoTransMap(); }
+                }
+            })
+            { IsBackground = true, Name = "Cs2AutoTranslatorSeed" }.Start();
         }
 
         // 把新译文/去标记「原地」刷到当前可见界面：调用 Cohtml 的本地化重译（只刷新，不惊动 I18N 等订阅者）。
@@ -765,10 +796,20 @@ namespace Cs2AutoTranslator
 
         // 「获取模型列表」按钮回调（需求2，主线程触发、后台线程拉取）：拉到的模型名进 TranslatorSetting 的列表，
         // 下拉框刷新后就能看到。四个 AI 引擎共用（自定义 AI + Groq / OpenRouter / SiliconFlow）。
+        // v1.1.6：单飞。连点不会同时起多个请求线程（否则界面上显示哪一次的结果
+        // 全看谁先回来）。已在跑时只更新提示文案、不重复发请求。
+        private static int _fetchingModels;
+
         private static void FetchModelsNow()
         {
             TranslatorSetting setting = TranslatorSetting.Instance;
             if (setting == null) return;
+            if (Interlocked.CompareExchange(ref _fetchingModels, 1, 0) != 0)
+            {
+                TranslatorSetting.FetchModelsResult = "正在获取模型列表，请稍候…（已有一个在跑）";
+                MarkUiDirtyAndRefresh();
+                return;
+            }
             PersistSettingsOnly();
             string name = setting.TranslationEngine.ToString();
             string vendor = setting.TranslationEngine == TranslatorSetting.Engine.Custom ? CustomAi.Normalize(setting.CustomVendor.ToString()) : null;
@@ -834,8 +875,9 @@ namespace Cs2AutoTranslator
                     TranslatorSetting.FetchModelsResult = "✗ 获取失败: " + ex.Message;
                     ModLog.Error("[模型列表] 失败: " + ex.Message + " | 服务端：" + Probe.Trunc(Http.ErrorBody(ex) ?? "", 300));
                 }
+                finally { Interlocked.Exchange(ref _fetchingModels, 0); }
                 MarkUiDirtyAndRefresh();
-            }) { IsBackground = true }.Start();
+            }) { IsBackground = true, Name = "Cs2AutoTranslatorFetchModels" }.Start();
         }
 
         // 「保存设置并翻译」按钮回调（主线程）：先写盘并同步热路径镜像，再解除暂停、清运行时译文并按新设置重刷。
@@ -1344,19 +1386,37 @@ namespace Cs2AutoTranslator
             return sb.ToString().Trim();
         }
 
-        private static LocalizationManager WaitForLocalizationManager()
+        // v1.1.6：一次性引导用的主线程探针。把「本地化管理器是否就绪 + 当前语言」抄进
+        // 托管静态字段（Patches.LocalizationReady / Patches.ActiveLocale），后台线程只等字段。
+        // 为什么：Bootstrap 跑在后台工作线程上，而 GameManager/localizationManager 是
+        // Unity/Colossal 原生对象，跨线程直接读属于偶发、难复现的崩溃来源。这里改为主线程
+        // 每帧探一次（与守护 updater 每 2 秒刷新 ActiveLocale 同一思路），就绪后停。
+        // _probing=false 时不再自我续期：Bootstrap 超时返回后探针自动熄灭，不空转。
+        private static volatile bool _probing;
+
+        private static void ProbeLocalizationOnMainThread()
         {
-            for (int i = 0; i < 180; i++)
+            MainThreadDispatcher.RunOnMainThread(() =>
             {
-                Thread.Sleep(1000);
                 try
                 {
-                    LocalizationManager lm = GameManager.instance?.localizationManager;
-                    if (lm != null) { ModLog.Info($"[线程] 本地化管理器就绪，activeLocaleId={lm.activeLocaleId}。"); return lm; }
+                    var lm = GameManager.instance?.localizationManager;
+                    if (lm != null)
+                    {
+                        string al = lm.activeLocaleId;
+                        if (!string.IsNullOrEmpty(al)) Patches.ActiveLocale = al;
+                        int entries = lm.activeDictionary?.entryCount ?? 0;
+                        if (entries > 100)
+                        {
+                            if (!Patches.LocalizationReady)
+                                ModLog.Info($"[线程] 本地化管理器就绪，activeLocaleId={al}，字典 {entries} 条。");
+                            Patches.LocalizationReady = true;
+                        }
+                    }
                 }
                 catch (Exception ex) { ModLog.Error("[线程] 等待本地化异常: " + ex.Message); }
-            }
-            return null;
+                if (_probing && !Patches.LocalizationReady) ProbeLocalizationOnMainThread();
+            });
         }
 
         private static bool WaitFor(Func<bool> cond, int seconds)
@@ -1475,7 +1535,10 @@ namespace Cs2AutoTranslator
     // 参考 BetterChineseNames（同款 patch）与 I18NEverywhere（patch 内层 TryGetValue）。
     internal static class Patches
     {
-        private const string HarmonyId = "com.yourname.cs2autotranslator";
+        // v1.1.6：占位 id 换成自己的反域名 id。HarmonyId 只在本局内标识"哪些补丁是我们挂的"
+        //（IsApplied / UnpatchAll 的 owner 判据），不跨会话持久化，所以换号无兼容问题；
+        // 留 "com.yourname" 这种占位名，将来跟别的模组撞号时无法定责。
+        private const string HarmonyId = "com.yuexian.cs2autotranslator";
         private static Harmony _harmony;
         private static MethodInfo _translateMethod;
         private static float _lastCheck;
@@ -1497,9 +1560,15 @@ namespace Cs2AutoTranslator
         internal static volatile bool ScopeModName, ScopeModOptions, ScopeAssetNames, ScopeAssetDesc, ScopeWorldLabels, ScopeGameCore;
         internal static volatile string TargetLocale = "zh-HANS";
         internal static volatile string ActiveLocale = "";        // 游戏当前显示语言 id（如 en-US / zh-HANS），供同语言跳过判定用；由 SyncSettings/守护循环刷新。
+        // v1.1.6：本地化是否就绪（主线程探针抄到「字典有内容」）。Bootstrap 跑在后台线程，
+        // 只等这个托管字段，不在后台直接读 GameManager/localizationManager（跨线程硬读是崩溃源）。
+        internal static volatile bool LocalizationReady;
         internal static volatile string EngineCacheName = "google";
 
         // 从 TranslatorSetting.Instance 把开关/目标语言/引擎名镜像到上面的静态字段。主线程或后台线程皆可调用。
+        // v1.1.6：不再在这里读 ActiveLocale —— 此前这行在后台线程（Bootstrap 调它）直接读
+        // GameManager/localizationManager（跨线程硬读是崩溃源）。ActiveLocale 由主线程负责：
+        // 引导时靠 ProbeLocalizationOnMainThread、运行期靠守护 updater 每 2 秒刷新。
         public static void SyncSettings()
         {
             try
@@ -1515,7 +1584,6 @@ namespace Cs2AutoTranslator
                 ScopeGameCore = s.ScopeGameCore;
                 TargetLocale = string.IsNullOrEmpty(s.TargetLocale) ? "zh-HANS" : s.TargetLocale;
                 EngineCacheName = EngineKit.CacheName(s.TranslationEngine.ToString());
-                try { ActiveLocale = GameManager.instance?.localizationManager?.activeLocaleId ?? ""; } catch { }
             }
             catch (Exception ex) { ModLog.Error("[Hook] SyncSettings 异常: " + ex.Message); }
         }
@@ -3106,6 +3174,31 @@ namespace Cs2AutoTranslator
             CountIfWorld(src);
         }
 
+        // v1.1.6：预载专用。与 SetTranslation/ResolveAsSkip 同写内存表，但【不碰在飞计数】
+        // —— 预载的条目从来不是 Take() 出来的，没有「在飞」这一笔可还。旧写法直接复用
+        // SetTranslation，靠 DecrementInFlight 的钳制碰巧抵消；显式分开后，种子缓存与
+        // 在飞计数的耦合就没了（将来若把钳制改回 Interlocked.Decrement 也不会崩）。
+        public static void SeedTranslation(string src, string tr)
+        {
+            Translated[src] = tr;
+            Queued.TryRemove(src, out _);
+            Resolved.TryRemove(src, out _);
+            GivenUp.TryRemove(src, out _);
+            Attempts.TryRemove(src, out _);
+            Transient.TryRemove(src, out _);
+            CountIfWorld(src);
+        }
+
+        public static void SeedSkip(string src)
+        {
+            Resolved[src] = 0;
+            Queued.TryRemove(src, out _);
+            Translated.TryRemove(src, out _);
+            GivenUp.TryRemove(src, out _);
+            Attempts.TryRemove(src, out _);
+            Transient.TryRemove(src, out _);
+        }
+
         // ===== 需求3：只属于「游戏画面图层」的新译文信号 =====
         // 为什么要单独统计：刷新图层要清渲染缓存、甚至重读语言字典，都不便宜。
         // 若按「任何译文落地」触发，翻菜单时也会每 10 秒白刷一次路面文字。所以由 WorldLabelPostfix 先登记
@@ -3233,6 +3326,11 @@ namespace Cs2AutoTranslator
         // 反馈4：只有一种刷新方式，所以这里不再读任何档位 —— 关掉范围/总开关时第一行就返回，热路径开销可忽略。
         public static void Tick()
         {
+            // v1.1.6：待办的强制刷新（「保存设置」/「清除缓存」/「重新翻译」进来时记的账）。
+            // 放在退出闸门【之前】：关掉翻译时（Paused=true）也欠着一次「画面回原文」，
+            // 那一下不能因为开关关了就被吞掉。
+            RunPendingForce();
+
             if (!Patches.HookEnabled || Patches.Paused || !Patches.ScopeWorldLabels)
             {
                 // 关掉期间的进出存档都不算数：复位后玩家重新开启时，会当成「刚进存档」再走一遍首批刷新，
@@ -3360,9 +3458,33 @@ namespace Cs2AutoTranslator
         // 还卡在上面那三份缓存里 —— 而 Tick() 第一行就被 HookEnabled / Paused / ScopeWorldLabels 挡掉，
         // 永远不会再去清，玩家只能重进存档才看得到原文。所以这里开一条【不看任何开关】的强制通道：
         // 三份缓存全清 + 重读一次语言字典，下一帧游戏重新问 NameSystem，此时 Postfix 放行原文，画面就恢复了。
-        // 只由主线程的按钮回调（SaveNow / ClearCacheNow）调用，所以不需要限流。
+        // 只由主线程的按钮回调（SaveNow / ClearCacheNow / RetranslateNow）调用。
+        // v1.1.6：加 400ms 节流（见 ForceRefresh 内的说明）。
+        private const int ForceMinMs = 400;
+        private static bool _forcePending;
+        private static string _forceReason;
+        private static int _lastForceTick;
+
         public static void ForceRefresh(string reason)
         {
+            // v1.1.6：这里被「保存设置」（快捷键 0.5 秒可连按）、「清除缓存」与「重新翻译」
+            // 在主线程调用，每一次都清三份渲染缓存 + 重烤 + 可能重读整张语言字典。
+            // 连按时那是连续几下重活。改成「先记账、窗口到了就做」：压得够近的两次
+            // 合并成一次——【延后，绝不丢】（关掉翻译时玩家指望画面立刻回原文，那一下
+            // 不能吞），由 Tick() 在退出闸门【之前】补做。
+            _forcePending = true;
+            _forceReason = reason;
+            RunPendingForce();
+        }
+
+        private static void RunPendingForce()
+        {
+            if (!_forcePending) return;
+            int now = Environment.TickCount;
+            if (now - _lastForceTick < ForceMinMs) return;   // 压得够近：留给 Tick() 到点做
+            _forcePending = false;
+            string reason = _forceReason; _forceReason = null;
+            _lastForceTick = now;
             RefreshWorld(reason);
             // 上面这两步会让游戏把视野内的世界文字重新入队，等于又产生了一批待翻文本：若此刻确实在存档里，
             // 就重新武装「首批」等待，让 Tick() 在这批翻完后自动再强刷一次（反馈6 的行为对这几个按钮同样成立）。
@@ -3560,19 +3682,23 @@ namespace Cs2AutoTranslator
 
         // 把缓存里「指定引擎 + 指定目标语言」命中的历史译文预载进运行时 TransMap（需求9a）。
         // 返回预载条数。缓存 key 形如 engine|dst|b64(src)，value 是 b64(trans)。
-        public static int SeedTransMap(string engine, string dst)
+        public static int SeedTransMap(string engine, string dst, int clearStamp)
         {
             if (string.IsNullOrEmpty(engine) || string.IsNullOrEmpty(dst)) return 0;
             string prefix = engine + "|" + dst + "|";
             int n = 0;
             foreach (var kv in Dict)
             {
+                // v1.1.6：扫描期间玩家又点了保存/清缓存 ⇒ 这一代的结果已经作废，
+                // 立刻收手，调用方按负数识别并丢弃（与 EngineKit.ResultStillWanted 同一判据），
+                // 否则会把「旧目标语言」的译文写进新设置的译文表。
+                if (clearStamp != ClearStamp) return -1;
                 if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
                 string src = FromB64(kv.Key.Substring(prefix.Length));
                 string trans = FromB64(kv.Value);
                 if (string.IsNullOrEmpty(src)) continue;
-                if (string.IsNullOrEmpty(trans) || trans == src) TransMap.ResolveAsSkip(src);
-                else { TransMap.SetTranslation(src, trans); n++; }
+                if (string.IsNullOrEmpty(trans) || trans == src) TransMap.SeedSkip(src);
+                else { TransMap.SeedTranslation(src, trans); n++; }
             }
             return n;
         }

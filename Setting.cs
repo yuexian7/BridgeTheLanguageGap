@@ -187,13 +187,28 @@ namespace Cs2AutoTranslator
         // ⚠ 成员名必须与 EngineKit.CustomAi.ThinkingLevels 里那一串 ~ 分隔的词逐字相同：两边靠【名字】互转
         // （存盘词 = lv.ToString()，读回 = CustomAi.ParseLevel），数值一律不参与。
         // ⚠ 成员从 0 连续编号，不给数值留空洞。
-        public enum AiThinkOpenAi { Off, Minimal, Low, Medium, High, Xhigh, Max }    // 全七档：OpenAI / GLM / Groq / OpenRouter
-        public enum AiThinkAnthropic { Off, Low, Medium, High, Xhigh, Max }         // Claude：effort 这一族没有 minimal
-        public enum AiThinkGemini { Off, Minimal, Low, Medium, High }               // Gemini 2.5 与 3.x 的并集，认不出的代际由 ThinkingField 挤回
-        public enum AiThinkGrok { Off, Low, Medium, High, Xhigh }                   // Grok：无 minimal、无 max
-        public enum AiThinkKimi { Off, Low, High, Max }                             // Kimi / DeepSeek：官方都没有 medium
-        public enum AiThinkPlain { Off, Low, Medium, High }                        // 「自定义」端点：对面是谁只有玩家知道，只给最通用那四档
-        public enum AiThinkSilicon { Off, High, Max }                              // 硅基流动：平台的 effort 只收 high / max
+
+        // ---- v1.1.7：自定义 AI 那八行的档位（首档 None = 显式不思考）----
+        // 「发不发」由上面一行 AiThinkSend 决定；这一行决定发哪一档，所以第一档是 None 而不是 Off。
+        // gpt 与 glm 给满七档（None → Max），其余仍按各家真实集合收窄（表在 CustomAi.ThinkingLevels）。
+        public enum AiThinkOpenAi { None, Minimal, Low, Medium, High, Xhigh, Max }    // 全七档：gpt / GLM
+        public enum AiThinkAnthropic { None, Low, Medium, High, Xhigh, Max }         // Claude：effort 这一族没有 minimal
+        public enum AiThinkGemini { None, Minimal, Low, Medium, High }               // Gemini 2.5 与 3.x 的并集，认不出的代际由 ThinkingField 挤回
+        public enum AiThinkGrok { None, Low, Medium, High, Xhigh }                   // Grok：无 minimal、无 max
+        public enum AiThinkKimi { None, Low, High, Max }                             // Kimi / DeepSeek：官方都没有 medium
+        public enum AiThinkPlain { None, Low, Medium, High }                        // 「自定义」端点：对面是谁只有玩家知道，只给最通用那四档
+
+        // ---- v1.1.7：「这一行到底发不发这个字段」的开关（自定义 AI 八家厂商各一格）----
+        // 可选项：选「不发送」时请求体里一个思考字段都没有，平台按它自己的默认档走（多数平台的默认是会思考、
+        // 会扣费，所以这一档不是"省钱的推荐项"，只是把决定权交回玩家）；选「发送」时下面才多出「档位」一行。
+        public enum AiThinkSend { Off, On }
+
+        // ---- 四档直连大模型引擎沿用的老档位集合（首档 Off = 按这一家的口径显式关掉）----
+        // 为什么直连引擎不跟着改成两行式：它们没有"可选项"这个诉求（Gemini/Groq/OpenRouter/SiliconFlow
+        // 都必须发一个明确档位，否则就是按平台默认档思考烧额度），保持一行 + Off 语义不变最稳。
+        public enum AiThinkEngineOpenAi { Off, Minimal, Low, Medium, High, Xhigh, Max }   // Groq / OpenRouter
+        public enum AiThinkEngineGemini { Off, Minimal, Low, Medium, High }               // Gemini
+        public enum AiThinkSilicon { Off, High, Max }                                     // 硅基流动：平台的 effort 只收 high / max
 
         private Engine _engine = Engine.Google;
 
@@ -338,6 +353,18 @@ namespace Cs2AutoTranslator
         private bool HideVendorGrok() => HideVendorSlot(6);
         private bool HideVendorGlm() => HideVendorSlot(7);
         private bool HideVendorCustom() => HideVendorSlot(8);
+
+        // v1.1.7：「档位」行的显隐 = 上面那行「思考强度」选了「发送」。
+        // 下标与 HideVendor* 完全一致（CustomAi.Vendors 的顺序），两套谓词只差最后那个条件。
+        private bool HideLevelSlot(int i) => HideVendorSlot(i) || !SendsAt(i);
+        private bool HideLevelGpt() => HideLevelSlot(0);
+        private bool HideLevelClaude() => HideLevelSlot(1);
+        private bool HideLevelKimi() => HideLevelSlot(2);
+        private bool HideLevelDeepseek() => HideLevelSlot(4);
+        private bool HideLevelVendorGemini() => HideLevelSlot(5);
+        private bool HideLevelGrok() => HideLevelSlot(6);
+        private bool HideLevelGlm() => HideLevelSlot(7);
+        private bool HideLevelVendorCustom() => HideLevelSlot(8);
 
         // 反馈8：厂商选「自定义」时多出三行（接口格式 / 模型名称 / 思考强度），同时模型【下拉框】要让位给文本框 ——
         // 自填接口的模型名只有玩家自己知道，而下拉框只能从「获取模型列表」的结果里挑，自定义地址未必提供 /models，
@@ -699,13 +726,31 @@ namespace Cs2AutoTranslator
         // 格位编号的唯一真值在 EngineKit.ThinkingSlot（t3 的 Q 段把它钉死了）；存盘键带引擎名/厂商名。
         // 第九轮：Off 的含义从「一个字段都不发」改成「按这一家的口径显式关掉」——逐家核实过，不发字段在 13 格里
         // 只有 2 格真等于不思考，其余是「按那一家的默认档继续思考继续扣费」。该发什么由 CustomAi.ThinkingField 决定。
+        // v1.1.7（用户点名）：自定义 AI 那八行改成【两行式】—— 上面一行「思考强度」只决定发不发这个字段，
+        // 下面一行「档位」决定发哪一档。于是每一格要多记一个开关；落盘仍用同一个键（空串 = 不发送），
+        // 不新增磁盘字段，也不推翻第九轮那条"不发就是按默认档在花钱"的结论（老盘的 Off 一律迁移成 发送+None）。
         private readonly CustomAi.ThinkLevel[] Thinking = new CustomAi.ThinkLevel[EngineKit.ThinkingSlots];
+
+        // 这一格到底发不发思考字段。前 9 格 = 自定义 AI 的九家厂商（默认关，千问那一格恒关），
+        // 后 13 格 = 直连引擎（没有开关，恒开）。ClearThinking 里按同一套边界重置。
+        private readonly bool[] ThinkingSend = new bool[EngineKit.ThinkingSlots];
 
         private CustomAi.ThinkLevel ThinkingAt(int slot) => (slot >= 0 && slot < Thinking.Length) ? Thinking[slot] : CustomAi.ThinkLevel.Off;
 
         private void SetThinkingAt(int slot, CustomAi.ThinkLevel value)
         {
             if (slot >= 0 && slot < Thinking.Length) Thinking[slot] = value;
+        }
+
+        private bool SendsAt(int slot)
+        {
+            // 直连引擎的格位（>= 厂商数）没有开关，恒定发送；越界同样当"发送"，别把已有档位静默吞掉。
+            return slot < 0 || slot >= ThinkingSend.Length || slot >= CustomAi.Vendors.Length || ThinkingSend[slot];
+        }
+
+        private void SetSendsAt(int slot, bool value)
+        {
+            if (slot >= 0 && slot < ThinkingSend.Length) ThinkingSend[slot] = value;
         }
 
         // 某档引擎（vendor 只对「自定义 AI」有意义）自己存的那一档。没有这一行的引擎 → 格位 -1 → 回 Off。
@@ -718,9 +763,35 @@ namespace Cs2AutoTranslator
             SetThinkingAt(EngineKit.ThinkingSlot(engineName, vendor), value);
         }
 
+        // 这一格发不发思考字段。四档直连大模型引擎恒定 true（它们没有开关那一行）。
+        internal bool IsThinkingOn(string engineName, string vendor) => SendsAt(EngineKit.ThinkingSlot(engineName, vendor));
+
+        internal void SetThinkingOn(string engineName, string vendor, bool on)
+        {
+            SetSendsAt(EngineKit.ThinkingSlot(engineName, vendor), on);
+        }
+
+        // 落盘用：不发送就写空串（读回来空串同样判"不发送"，所以不必另立一个哨兵值）。
+        internal string ThinkingWire(string engineName, string vendor)
+        {
+            int slot = EngineKit.ThinkingSlot(engineName, vendor);
+            if (!SendsAt(slot)) return string.Empty;
+            return ThinkingAt(slot).ToString();
+        }
+
+        // 读盘用：空串 = 玩家选了「不发送」（或从没配过这一格）；非空 = 发送，并记住那一档。
+        // 老盘写的 "Off" 会走到这里并置成发送 + Off，而 Off 在下面每个 *Field 里与 None 行为完全一致
+        // ⇒ 升级玩家的线上行为一字不变，界面上那一行也只是从 Off 变成 None。
+        internal void PutThinkingWire(string engineName, string vendor, string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) { SetThinkingOn(engineName, vendor, false); SetThinkingAt(EngineKit.ThinkingSlot(engineName, vendor), CustomAi.ThinkLevel.None); return; }
+            SetThinkingOn(engineName, vendor, true);
+            SetThinkingAt(EngineKit.ThinkingSlot(engineName, vendor), CustomAi.ParseLevel(raw));
+        }
+
         // 规范档位 ↔ 界面上那一行的枚举。两边成员名逐字相同，所以只按名字转，数值不参与
         // （AiThinkKimi.Low 是 1、CustomAi.ThinkLevel.Low 是 2，按数值硬转会错位）。
-        // 名字对不上只可能是「这一行没有这一档」→ 回 Off，与读盘认不出脏值的处理一致。
+        // 名字对不上只可能是「这一行没有这一档」→ 回该枚举的首档，与读盘认不出脏值的处理一致。
         private static T ThinkRow<T>(CustomAi.ThinkLevel lv) where T : struct
         {
             T v;
@@ -730,63 +801,128 @@ namespace Cs2AutoTranslator
         private static CustomAi.ThinkLevel ThinkLevelOf(object row) => CustomAi.ParseLevel(Convert.ToString(row));
 
         // 「恢复默认」用：一次清全部格位，与 ClearVendorCredentials 同理（只清当前格会让切到别家时仍看到旧档位）。
+        // v1.1.7：厂商那九格连开关一起关掉（默认"不发送"），直连引擎那十三格照旧只清档位（它们没有开关）。
         public void ClearThinking()
         {
             for (int i = 0; i < Thinking.Length; i++) Thinking[i] = CustomAi.ThinkLevel.Off;
+            for (int i = 0; i < ThinkingSend.Length; i++) ThinkingSend[i] = i >= CustomAi.Vendors.Length;
         }
 
-        // ---- 四档直连大模型引擎各一行（自定义 AI 那八行用上面现成的 HideVendor* 谓词）----
+        // ===== v1.1.7：选项页要立刻重算显隐 =====
+        // 「思考强度」那一行从关拨到开时，下面的「档位」行要当场现身。显隐条件是 RefreshPage 才重算的，
+        // 而拨动下拉框本身不触发它 —— 所以置一个标记，由已经每 1.2 秒跑一次的 DropdownL10n.Tick 带走
+        // （与换厂商时 VendorSwitched 走的是同一条轻路径：只刷页面，不清译文、不重翻、不发请求）。
+        private static volatile bool _shapeChanged;
+
+        internal static bool ConsumeShapeChanged()
+        {
+            bool v = _shapeChanged;
+            _shapeChanged = false;
+            return v;
+        }
+
+        private static void NoteShapeChanged() { _shapeChanged = true; }
+
+        // ---- 四档直连大模型引擎各一行（v1.1.7：仍是老的一行式，首档 Off = 按这一家口径显式关掉）----
+        // 为什么不跟着改成两行式：这四家都必须发一个明确档位，不发就是按平台默认档思考、烧额度，
+        // 给一个"不发送"的选项等于把玩家往坑里推。可变选项只针对自定义 AI 那八行。
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideThinkingGemini))]
-        public AiThinkGemini ThinkEngineGemini { get => ThinkRow<AiThinkGemini>(GetThinking(nameof(Engine.Gemini), null)); set => PutThinking(nameof(Engine.Gemini), null, ThinkLevelOf(value)); }
+        public AiThinkEngineGemini ThinkEngineGemini { get => ThinkRow<AiThinkEngineGemini>(GetThinking(nameof(Engine.Gemini), null)); set => PutThinking(nameof(Engine.Gemini), null, ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideThinkingGroq))]
-        public AiThinkOpenAi ThinkEngineGroq { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.Groq), null)); set => PutThinking(nameof(Engine.Groq), null, ThinkLevelOf(value)); }
+        public AiThinkEngineOpenAi ThinkEngineGroq { get => ThinkRow<AiThinkEngineOpenAi>(GetThinking(nameof(Engine.Groq), null)); set => PutThinking(nameof(Engine.Groq), null, ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideThinkingOpenRouter))]
-        public AiThinkOpenAi ThinkEngineOpenRouter { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.OpenRouter), null)); set => PutThinking(nameof(Engine.OpenRouter), null, ThinkLevelOf(value)); }
+        public AiThinkEngineOpenAi ThinkEngineOpenRouter { get => ThinkRow<AiThinkEngineOpenAi>(GetThinking(nameof(Engine.OpenRouter), null)); set => PutThinking(nameof(Engine.OpenRouter), null, ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideThinkingSiliconFlow))]
         public AiThinkSilicon ThinkEngineSiliconFlow { get => ThinkRow<AiThinkSilicon>(GetThinking(nameof(Engine.SiliconFlow), null)); set => PutThinking(nameof(Engine.SiliconFlow), null, ThinkLevelOf(value)); }
 
-        // ---- 自定义 AI：八家厂商各一行。厂商下拉框切到哪一家，露出来的就是哪一行的那一格。----
-        // 千问没有这一行：阿里云原文要求非流式调用必须 enable_thinking=false，这一格没有任何可调档位，
+        // ---- 自定义 AI：八家厂商各两行（v1.1.7）。厂商下拉框切到哪一家，露出来的就是哪两行。----
+        // 上面一行「思考强度」决定发不发这个字段；下面一行「档位」决定发哪一档，只在选了「发送」时出现。
+        // 千问两行都没有：阿里云原文要求非流式调用必须 enable_thinking=false，这一格没有任何可调档位，
         // 所以格位也不留（EngineKit.ThinkingSlot 对空档位集合回 -1），发请求时由 CustomAi.QwenField 恒定关思考。
+
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorGpt))]
-        public AiThinkOpenAi ThinkGpt { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.gpt))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.gpt), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendGpt { get => SendRow(0); set => SetSendRow(0, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelGpt))]
+        public AiThinkOpenAi ThinkLevelGpt { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.gpt))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.gpt), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorClaude))]
-        public AiThinkAnthropic ThinkClaude { get => ThinkRow<AiThinkAnthropic>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.claude))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.claude), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendClaude { get => SendRow(1); set => SetSendRow(1, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelClaude))]
+        public AiThinkAnthropic ThinkLevelClaude { get => ThinkRow<AiThinkAnthropic>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.claude))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.claude), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorKimi))]
-        public AiThinkKimi ThinkKimi { get => ThinkRow<AiThinkKimi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.kimi))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.kimi), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendKimi { get => SendRow(2); set => SetSendRow(2, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelKimi))]
+        public AiThinkKimi ThinkLevelKimi { get => ThinkRow<AiThinkKimi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.kimi))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.kimi), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorDeepseek))]
-        public AiThinkKimi ThinkDeepseek { get => ThinkRow<AiThinkKimi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.deepseek))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.deepseek), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendDeepseek { get => SendRow(4); set => SetSendRow(4, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelDeepseek))]
+        public AiThinkKimi ThinkLevelDeepseek { get => ThinkRow<AiThinkKimi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.deepseek))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.deepseek), ThinkLevelOf(value)); }
 
         // 厂商 gemini 与上面引擎 Gemini【不是同一格】：一个走玩家自备的接口地址，一个走官方端点。
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorGemini))]
-        public AiThinkGemini ThinkVendorGemini { get => ThinkRow<AiThinkGemini>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.gemini))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.gemini), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendVendorGemini { get => SendRow(5); set => SetSendRow(5, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelVendorGemini))]
+        public AiThinkGemini ThinkLevelVendorGemini { get => ThinkRow<AiThinkGemini>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.gemini))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.gemini), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorGrok))]
-        public AiThinkGrok ThinkGrok { get => ThinkRow<AiThinkGrok>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.grok))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.grok), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendGrok { get => SendRow(6); set => SetSendRow(6, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelGrok))]
+        public AiThinkGrok ThinkLevelGrok { get => ThinkRow<AiThinkGrok>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.grok))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.grok), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorGlm))]
-        public AiThinkOpenAi ThinkGlm { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.glm))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.glm), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendGlm { get => SendRow(7); set => SetSendRow(7, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelGlm))]
+        public AiThinkOpenAi ThinkLevelGlm { get => ThinkRow<AiThinkOpenAi>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.glm))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.glm), ThinkLevelOf(value)); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorCustom))]
-        public AiThinkPlain ThinkVendorCustom { get => ThinkRow<AiThinkPlain>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.custom))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.custom), ThinkLevelOf(value)); }
+        public AiThinkSend ThinkSendVendorCustom { get => SendRow(8); set => SetSendRow(8, value); }
+
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelVendorCustom))]
+        public AiThinkPlain ThinkLevelVendorCustom { get => ThinkRow<AiThinkPlain>(GetThinking(nameof(Engine.Custom), nameof(AiVendor.custom))); set => PutThinking(nameof(Engine.Custom), nameof(AiVendor.custom), ThinkLevelOf(value)); }
+
+        // 下标 ↔ 界面那一行的互转（下标顺序同 CustomAi.Vendors，与 HideVendor* 那批谓词一致）。
+        private AiThinkSend SendRow(int slot) => SendsAt(slot) ? AiThinkSend.On : AiThinkSend.Off;
+
+        private void SetSendRow(int slot, AiThinkSend value)
+        {
+            bool on = value == AiThinkSend.On;
+            if (SendsAt(slot) == on) return;      // 同值不触发：框架初始化会重复赋值
+            SetSendsAt(slot, on);
+            // 从关拨到开时，下面那一行要当场现身（显隐只有 RefreshPage 才重算，见 NoteShapeChanged 的注释）。
+            if (on) NoteShapeChanged();
+        }
 
         // 当前引擎/厂商的默认模型名。三处共用（下拉框首项、AiModel 兜底、EffectiveModel），
         // 以前是三份一样的三元表达式抄在一起，改一处漏两处。

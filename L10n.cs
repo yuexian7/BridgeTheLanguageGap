@@ -740,6 +740,10 @@ namespace Cs2AutoTranslator
                 "對方介面認得的模型名稱，例如 gpt-4o-mini 或本機模型的 id。這裡手填是因為自訂位址不一定提供模型清單可選。");
 
             AddEnZh(t, "label.customThinking", "Reasoning effort", "思考强度", "思考強度");
+            // v1.1.7：上面那一行「思考强度」的两个开关词。选「不发送」时请求体里不带这个字段，
+            // 平台按自己的默认档走（多数平台默认会思考、照常计费）—— 这句话在 desc.thinkingSend 里对玩家说清。
+            AddEnZh(t, "enum.thinkSend.off", "Do not send", "不发送", "不發送");
+            AddEnZh(t, "enum.thinkSend.on", "Send", "发送", "發送");
             // 用户定稿：这一句到此为止。原先还写了「下拉框只列这一家真正支持的档位」「关不掉的模型 Off＝最低档」
             // 「认不出模型代际就不发字段」「每档引擎各存自己那一格」「通义千问没有这一行」五条机制说明，
             // 他判定太啰嗦全部删掉。这些都仍然成立，只是不再对玩家解释（逐家真值表见交接文档 §10 第 58 条）。
@@ -747,6 +751,20 @@ namespace Cs2AutoTranslator
                 "How long the model thinks before it answers; the higher the effort, the slower it is.",
                 "模型回答前先想多久，强度越高速度越慢。",
                 "模型回答前先想多久，強度越高速度越慢。");
+
+            // v1.1.7：思考强度拆成两行。上面这一行只决定「发不发这个字段」，下面那一行（档位）决定「发哪一档」。
+            // 不发送时请求体里一个思考字段都没有 ⇒ 平台按它自己的默认档走，而多数平台的默认是【会思考、会扣费】，
+            // 所以这一档不是"省钱推荐项"，只是把决定权交回玩家 —— 这句话必须写在说明里，否则玩家会误会。
+            AddEnZh(t, "label.thinkingSend", "Reasoning effort", "思考强度", "思考強度");
+            AddEnZh(t, "desc.thinkingSend",
+                "Whether to send the reasoning-effort field at all. Not sending it leaves the field out of the request, and the platform then applies its own default — which for most vendors means thinking anyway, and being charged for it.",
+                "要不要向接口发送思考强度这个字段。选择不发送时请求里不带这个字段，平台会按它自己的默认档处理，而多数平台的默认是会思考、照常计费。",
+                "要不要向介面發送思考強度這個欄位。選擇不發送時請求裡不帶這個欄位，平台會按它自己的預設檔處理，而多數平台的預設會思考、照常計費。");
+            AddEnZh(t, "label.thinkingLevel", "Reasoning effort level", "思考档位", "思考強度檔位");
+            AddEnZh(t, "desc.thinkingLevel",
+                "How long the model thinks before it answers; the higher the effort, the slower it is. None asks the platform for no thinking at all.",
+                "模型回答前先想多久，强度越高速度越慢。选 None 是明确要求不思考。",
+                "模型回答前先想多久，強度越高速度越慢。選 None 是明確要求不思考。");
 
             // 「获取模型列表」按钮 + 结果显示行（需求2）。框架一行只放一个控件，所以按钮排在下拉框的上一行。
             AddEnZh(t, "label.fetchModels", "Fetch AI model list", "获取模型列表", "取得模型清單");
@@ -1227,17 +1245,39 @@ namespace Cs2AutoTranslator
             // 文案完全相同，所以一次循环注册完。属性名用 nameof 取 —— 手打字符串写错一个字母，
             // 那行就会退回框架的默认标题（英文属性名），而这在编译期什么都不会说。
             // 第九轮：千问那一格取消（阿里云非流式调用不允许开思考，没有任何可调档位），所以从 13 行变 12 行。
-            string[] thinkingRows =
+            // v1.1.7：自定义 AI 那八行变成两行——上面「思考强度」是发不发的开关，下面「档位」是发哪一档，
+            // 所以两份文案、两套属性名；四档直连大模型引擎仍是一行，沿用 label.customThinking。
+            string[] thinkingSendRows =
+            {
+                nameof(TranslatorSetting.ThinkSendGpt), nameof(TranslatorSetting.ThinkSendClaude),
+                nameof(TranslatorSetting.ThinkSendKimi), nameof(TranslatorSetting.ThinkSendDeepseek),
+                nameof(TranslatorSetting.ThinkSendVendorGemini), nameof(TranslatorSetting.ThinkSendGrok),
+                nameof(TranslatorSetting.ThinkSendGlm), nameof(TranslatorSetting.ThinkSendVendorCustom),
+            };
+            foreach (string row in thinkingSendRows)
+            {
+                d[m_Setting.GetOptionLabelLocaleID(row)] = L("label.thinkingSend");
+                d[m_Setting.GetOptionDescLocaleID(row)] = L("desc.thinkingSend");
+            }
+            string[] thinkingLevelRows =
+            {
+                nameof(TranslatorSetting.ThinkLevelGpt), nameof(TranslatorSetting.ThinkLevelClaude),
+                nameof(TranslatorSetting.ThinkLevelKimi), nameof(TranslatorSetting.ThinkLevelDeepseek),
+                nameof(TranslatorSetting.ThinkLevelVendorGemini), nameof(TranslatorSetting.ThinkLevelGrok),
+                nameof(TranslatorSetting.ThinkLevelGlm), nameof(TranslatorSetting.ThinkLevelVendorCustom),
+            };
+            foreach (string row in thinkingLevelRows)
+            {
+                d[m_Setting.GetOptionLabelLocaleID(row)] = L("label.thinkingLevel");
+                d[m_Setting.GetOptionDescLocaleID(row)] = L("desc.thinkingLevel");
+            }
+            // 四档直连大模型引擎：仍旧一行，标题/说明与第九轮一致。
+            string[] thinkEngineRows =
             {
                 nameof(TranslatorSetting.ThinkEngineGemini), nameof(TranslatorSetting.ThinkEngineGroq),
                 nameof(TranslatorSetting.ThinkEngineOpenRouter), nameof(TranslatorSetting.ThinkEngineSiliconFlow),
-                nameof(TranslatorSetting.ThinkGpt), nameof(TranslatorSetting.ThinkClaude),
-                nameof(TranslatorSetting.ThinkKimi),
-                nameof(TranslatorSetting.ThinkDeepseek), nameof(TranslatorSetting.ThinkVendorGemini),
-                nameof(TranslatorSetting.ThinkGrok), nameof(TranslatorSetting.ThinkGlm),
-                nameof(TranslatorSetting.ThinkVendorCustom),
             };
-            foreach (string row in thinkingRows)
+            foreach (string row in thinkEngineRows)
             {
                 d[m_Setting.GetOptionLabelLocaleID(row)] = L("label.customThinking");
                 d[m_Setting.GetOptionDescLocaleID(row)] = L("desc.customThinking");
@@ -1247,6 +1287,8 @@ namespace Cs2AutoTranslator
             // ⚠ 这里【一律不经过 L()】：L() 在缺手写译文时会走 SelfL10n 机翻，把 Low/High 翻成「低/高」，
             //   而玩家对 off/low/medium/high/max 这些原词的识别度远高于当地语言的对应词，机翻还会让同一家在不同
             //   语言下词长不一样。所以直接钉成员名字面量 —— 12 种语言同一份。
+            // v1.1.7：厂商那八行的档位枚举首档从 Off 改成 None（显式不思考），直连引擎那四行仍是 Off
+            //（按这一家自己的口径关掉）。两套枚举分开注册，别把 Off 与 None 混成同一个词。
             foreach (TranslatorSetting.AiThinkOpenAi v in Enum.GetValues(typeof(TranslatorSetting.AiThinkOpenAi)))
                 d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
             foreach (TranslatorSetting.AiThinkAnthropic v in Enum.GetValues(typeof(TranslatorSetting.AiThinkAnthropic)))
@@ -1261,6 +1303,14 @@ namespace Cs2AutoTranslator
                 d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
             foreach (TranslatorSetting.AiThinkSilicon v in Enum.GetValues(typeof(TranslatorSetting.AiThinkSilicon)))
                 d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
+            foreach (TranslatorSetting.AiThinkEngineOpenAi v in Enum.GetValues(typeof(TranslatorSetting.AiThinkEngineOpenAi)))
+                d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
+            foreach (TranslatorSetting.AiThinkEngineGemini v in Enum.GetValues(typeof(TranslatorSetting.AiThinkEngineGemini)))
+                d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
+            // 思考强度那一行的两个开关词。这里【要】过 L()——它们是给人读的指令，不是档位术语，
+            // 12 种语言应该有各自的母语说法（其余 9 种由 SelfL10n 机翻补齐）。
+            d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSend.Off)] = L("enum.thinkSend.off");
+            d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSend.On)] = L("enum.thinkSend.on");
 
             return d;
         }

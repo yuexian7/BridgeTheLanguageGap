@@ -368,8 +368,29 @@ namespace Cs2AutoTranslator
             return ms > capMs ? capMs : ms;
         }
 
-        // ===== 清代之后，路上那条请求的结果还要不要（v1.1.5，纯函数，离线断言直接钉）=====
-        // 场景：玩家点「清除缓存」那一刻，队列里已经空了，但【几条请求还在网上跑】。它们过 0.1~8 秒才回来，
+        // ===== 撞上「账号级回绝」之后该歇多久（v1.1.7，纯函数，离线断言直接钉）=====
+        // 为什么必须有这把梯子（2026-10-12 那一局的实测形状）：模型名不存在 / 余额不足 / key 失效这一类
+        // 401/402/403/404，旧写法是「把熔断计数直接推到上限，然后每条文本照旧各发一次请求」——
+        // 于是一次坏配置在几秒内刷出满屏 `[ERROR] [引擎] 请求失败`，并且每条文本各歇 5 秒，
+        // 玩家看到的就是「第一次测试/翻译就刷一屏错」。这些失败【换一条文本也不会变好】，所以正确做法是
+        // 整条链先停下来：歇 30 秒 → 60 秒 → 120 秒 → 封顶 5 分钟，期间一条请求都不发，
+        // 玩家修好 key/模型后点一下「保存设置并翻译」立刻解除（那条路会清掉全部退避账）。
+        // streak<=0 当第一次处理；capMs<=0 时按默认封顶 300000，免得调用方传错把冷却压成 0（那就是无限重撞）。
+        public static int BreakerCooldownMs(int streak, int capMs)
+        {
+            if (capMs <= 0) capMs = 300000;
+            int ms;
+            switch (streak <= 0 ? 1 : streak)
+            {
+                case 1: ms = 30000; break;
+                case 2: ms = 60000; break;
+                case 3: ms = 120000; break;
+                default: ms = 300000; break;
+            }
+            return ms > capMs ? capMs : ms;
+        }
+
+        // ===== 清代之后，路上那条请求的结果还要不要（v1.1.5，纯函数，离线断言直接钉）=====        // 场景：玩家点「清除缓存」那一刻，队列里已经空了，但【几条请求还在网上跑】。它们过 0.1~8 秒才回来，
         // 而落地那一步做的是 `Translated[src]=tr` + `TranslationCache.Put(...)` —— 于是刚被清空的内存表
         // 被填回去几条，【刚被删掉的 translation.cache 文件也被重新写出来】。
         // 玩家看到的正是「缓存没清干净」：清完之后文字还在，或者下次进存档又是一屏旧译文。
@@ -1325,12 +1346,17 @@ namespace Cs2AutoTranslator
         // 剩下认不准的那部分由 Mod.cs 的「带思考字段拿到 400/422 就剥掉该字段重发一次」兜底。
 
         // 档位的唯一口径。存盘存的就是这里的词，所以老档的 Off/Low/Medium/High 照读不误。
-        public enum ThinkLevel { Off, Minimal, Low, Medium, High, Xhigh, Max }
+        // v1.1.7 新增 None：玩家在界面上选了「不发送」时根本不走这条链（CustomEngine 传空档位进来），
+        // 而 None 是「显式发一个不思考的字段」—— 与 Off 在下面每一个 *Field 里行为完全相同，
+        // 拆成两个词只是因为【界面是两行】：上面一行决定发不发，下面一行决定发哪一档。
+        public enum ThinkLevel { Off, None, Minimal, Low, Medium, High, Xhigh, Max }
 
         public static ThinkLevel ParseLevel(string level)
         {
             switch (Normalize(level))
             {
+                case "off": return ThinkLevel.Off;
+                case "none": return ThinkLevel.None;
                 case "minimal": return ThinkLevel.Minimal;
                 case "low": return ThinkLevel.Low;
                 case "medium": return ThinkLevel.Medium;
@@ -1341,32 +1367,39 @@ namespace Cs2AutoTranslator
             }
         }
 
+        // 「关」与「显式 none」在每一家的字段形状里是同一件事，所以下面所有判据都走这一颗，
+        // 不写 `lv == ThinkLevel.Off` —— 少写一半条件的后果是某一家的 None 静默落到 default 分支上。
+        private static bool IsOff(ThinkLevel lv) { return lv == ThinkLevel.Off || lv == ThinkLevel.None; }
+
         // 这一格界面上该出现哪几档 = 这一家真实支持的档位集合，~ 分隔。认不出的组合返回空串 = 这一格没有这一行。
+        // v1.1.7：自定义 AI 那八行的首档从 Off 改成 None（上面一行是「发不发」的开关，这一行是「发哪一档」），
+        // 其中 gpt 与 glm 给满七档（None → Max），其余仍按各家真实集合收窄。
         // ⚠ Setting.cs 里那几个「行枚举」必须逐项对得上这张表：多一档玩家能选却发不出去，少一档存过的值读回来会被挤掉。
         public static string ThinkingLevels(string engineName, string vendor)
         {
-            const string SEVEN = "Off~Minimal~Low~Medium~High~Xhigh~Max";
+            const string SEVEN = "None~Minimal~Low~Medium~High~Xhigh~Max";   // 自定义 AI 八行：首档 None（显式不思考）
+            const string SEVEN_OFF = "Off~Minimal~Low~Medium~High~Xhigh~Max"; // 直连引擎四行：首档 Off（按各家口径关掉）
             if (Normalize(engineName) == "custom")
             {
                 switch (Normalize(vendor))
                 {
                     case "gpt": return SEVEN;                                  // 官方枚举：none/minimal/low/medium/high/xhigh/max
-                    case "claude": return "Off~Low~Medium~High~Xhigh~Max";      // effort 这一族没有 minimal
-                    case "kimi": return "Off~Low~High~Max";                     // K3 只有 low/high/max，没有 medium
+                    case "claude": return "None~Low~Medium~High~Xhigh~Max";     // effort 这一族没有 minimal
+                    case "kimi": return "None~Low~High~Max";                    // K3 只有 low/high/max，没有 medium
                     case "qwen": return string.Empty;                           // 非流式调用不许开思考 → 这一行直接不给，见 QwenField
-                    case "deepseek": return "Off~Low~High~Max";                 // medium 会被平台折成 high，干脆不列
-                    case "gemini": return "Off~Minimal~Low~Medium~High";
-                    case "grok": return "Off~Low~Medium~High~Xhigh";            // 无 minimal、无 max
+                    case "deepseek": return "None~Low~High~Max";                // medium 会被平台折成 high，干脆不列
+                    case "gemini": return "None~Minimal~Low~Medium~High";
+                    case "grok": return "None~Low~Medium~High~Xhigh";            // 无 minimal、无 max
                     case "glm": return SEVEN;
-                    case Custom: return "Off~Low~Medium~High";                  // 玩家自填端点，只给最通用那四档
+                    case Custom: return "None~Low~Medium~High";                 // 玩家自填端点，只给最通用那四档
                 }
                 return string.Empty;
             }
             switch (Normalize(engineName))
             {
                 case "gemini": return "Off~Minimal~Low~Medium~High";
-                case "groq": return SEVEN;
-                case "openrouter": return SEVEN;
+                case "groq": return SEVEN_OFF;
+                case "openrouter": return SEVEN_OFF;
                 case "siliconflow": return "Off~High~Max";                      // 平台的 effort 只收 high/max
             }
             return string.Empty;
@@ -1397,11 +1430,14 @@ namespace Cs2AutoTranslator
 
         // out outputTokens：这一档的思考要吃掉多少【输出额度】。谷歌与 Anthropic 都把思考 token 计在输出 token 里，
         // 所以这两家的 body 有 maxOutputTokens / max_tokens 字段要跟着抬高；OpenAI 兼容那一族没有这个字段，恒返回 0。
+        // v1.1.7：level 传空串 = 玩家在界面上选了「不发送」⇒ 一个思考字段都不写，请求体与「这一格压根不存在」逐字一致。
+        // 这条路径只有自定义 AI 的八家厂商走（那两行是可选的）；四档直连大模型引擎没有开关，恒定给一个真实档位。
         public static string ThinkingField(string engineName, string vendor, string protocol, string model, string level, out int outputTokens)
         {
             string en = Normalize(engineName);
             string v = Normalize(vendor);
             string m = Normalize(model);
+            if (string.IsNullOrEmpty(level)) { outputTokens = 0; return string.Empty; }
             ThinkLevel lv = ClampLevel(ParseLevel(level), ThinkingLevels(en, v));
             string shape = en == "custom" ? Protocol(v, protocol)
                         : en == "gemini" ? ProtocolGemini
@@ -1466,7 +1502,7 @@ namespace Cs2AutoTranslator
             if (!IsClaudeThinking(model)) return string.Empty;
             if (IsClaudeAdaptive(model))
             {
-                if (lv == ThinkLevel.Off) return ThinkType("disabled");
+                if (IsOff(lv)) return ThinkType("disabled");
                 string effort;
                 switch (lv)
                 {
@@ -1478,7 +1514,7 @@ namespace Cs2AutoTranslator
                 }
                 return ThinkType("adaptive") + ",\"output_config\":" + Str2("effort", effort);
             }
-            if (lv == ThinkLevel.Off) return string.Empty;    // 这一代不发就是不思考，不发才是对的
+            if (IsOff(lv)) return string.Empty;    // 这一代不发就是不思考，不发才是对的
             return "\"thinking\":{\"type\":\"enabled\"," + Num("budget_tokens", Budget(lv)) + "}";
         }
 
@@ -1512,7 +1548,7 @@ namespace Cs2AutoTranslator
                     default: return Str("reasoning_effort", "low");   // 含 Off：这一族关不掉，最低就是 low
                 }
             }
-            return lv == ThinkLevel.Off ? ThinkType("disabled") : ThinkType("enabled");
+            return IsOff(lv) ? ThinkType("disabled") : ThinkType("enabled");
         }
 
         // 千问：阿里云错误码页原文「parameter.enable_thinking must be set to false for non-streaming calls」。
@@ -1529,7 +1565,7 @@ namespace Cs2AutoTranslator
         private static string DeepSeekField(string model, ThinkLevel lv)
         {
             if (!ContainsAny(model, "v4", "reasoner")) return string.Empty;
-            if (lv == ThinkLevel.Off) return Contains(model, "v4") ? ThinkType("disabled") : string.Empty;
+            if (IsOff(lv)) return Contains(model, "v4") ? ThinkType("disabled") : string.Empty;
             if (!Contains(model, "v4")) return string.Empty;   // reasoner 没有可调档位，多发一个 effort 只是风险
             string effort = lv == ThinkLevel.Max ? "max" : lv == ThinkLevel.High ? "high" : "low";
             return ThinkType("enabled") + "," + Str("reasoning_effort", effort);
@@ -1553,9 +1589,9 @@ namespace Cs2AutoTranslator
         private static string GlmField(string model, ThinkLevel lv)
         {
             if (!IsGlmThinking(model)) return string.Empty;
-            if (!IsGlmEffort(model)) return lv == ThinkLevel.Off ? ThinkType("disabled") : ThinkType("enabled");
+            if (!IsGlmEffort(model)) return IsOff(lv) ? ThinkType("disabled") : ThinkType("enabled");
             bool five3 = ContainsAny(model, "5.3", "5-3");
-            if (lv == ThinkLevel.Off) return five3 ? Str("reasoning_effort", "low") : ThinkType("disabled");
+            if (IsOff(lv)) return five3 ? Str("reasoning_effort", "low") : ThinkType("disabled");
             string effort;
             switch (lv)
             {
@@ -1598,7 +1634,7 @@ namespace Cs2AutoTranslator
                 case ThinkLevel.Minimal: return Num("thinkingBudget", System.Math.Max(256, min));
                 case ThinkLevel.Low: return Num("thinkingBudget", 1024);
                 case ThinkLevel.Medium: return Num("thinkingBudget", 2048);
-                case ThinkLevel.Off: return Num("thinkingBudget", min);
+                case ThinkLevel.Off: case ThinkLevel.None: return Num("thinkingBudget", min);
                 default: return Num("thinkingBudget", 4096);      // High/Xhigh/Max
             }
         }
@@ -1607,7 +1643,7 @@ namespace Cs2AutoTranslator
         private static string GroqField(string model, ThinkLevel lv)
         {
             if (!IsGroqReasoning(model)) return string.Empty;
-            if (lv == ThinkLevel.Off) return IsGroqNoOff(model) ? Str("reasoning_effort", "low") : Str("reasoning_effort", "none");
+            if (IsOff(lv)) return IsGroqNoOff(model) ? Str("reasoning_effort", "low") : Str("reasoning_effort", "none");
             switch (lv)
             {
                 case ThinkLevel.Minimal: return Str("reasoning_effort", "minimal");
@@ -1636,7 +1672,7 @@ namespace Cs2AutoTranslator
         // 硅基流动：关＝enable_thinking:false；effort 只有 high/max，且只对官方点名的那三类模型开放。
         private static string SiliconField(string model, ThinkLevel lv)
         {
-            if (lv != ThinkLevel.Off)
+            if (!IsOff(lv))
             {
                 if (!ContainsAny(model, "deepseek-v4", "deepseek_v4", "glm-5.2", "glm-52")) return string.Empty;
                 return Str("reasoning_effort", lv == ThinkLevel.Max ? "max" : "high");

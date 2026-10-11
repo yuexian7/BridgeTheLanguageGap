@@ -51,7 +51,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.6：保存/重新翻译时缓存预载移到后台线程，主线程不再卡；引导阶段不再让后台线程跨线程读游戏对象；连按快捷键时世界刷新合并成一次；热路径少建临时对象) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.7：自定义AI厂商的思考强度改成可选项，不开就不传参数、开启后才选档位；引擎被服务端直接回绝时改为熔断并给出明确原因，不再一屏错) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -251,7 +251,7 @@ namespace Cs2AutoTranslator
                     if (string.IsNullOrEmpty(trans))
                     {
                         // 引擎无返回：分流见 OnFailure —— 限流/连接不通不烧这条文本的预算，文本自身翻不成才按次数判死。
-                        OnFailure(src, status, connFail, world, gen);
+                        OnFailure(src, status, connFail, world, gen, engine.Name);
                         continue;
                     }
 
@@ -266,7 +266,7 @@ namespace Cs2AutoTranslator
                 {
                     // 异常同样按「不确定」处理，但一样有次数上限（需求9d 只要求「不因一次抖动判死」，不要求无限重试）。
                     ModLog.Error("[懒翻译] 处理异常（稍后重试该条）: " + ex.Message);
-                    OnFailure(src, EngineBase.ConsumeStatus(), EngineBase.ConsumeConnectFailure(), world, gen);
+                    OnFailure(src, EngineBase.ConsumeStatus(), EngineBase.ConsumeConnectFailure(), world, gen, engine.Name);
                 }
             }
             TranslationCache.Flush(true);   // 正常退出循环：把攒下的增量条目强制写干净。
@@ -317,6 +317,19 @@ namespace Cs2AutoTranslator
         private const int RateLimitCooldownCapMs = 20000;   // 连续限流时的封顶档（就是 v1.1.3 以前那一档）
         private const int ConnectCooldownMs = 12000;
 
+        // ===== v1.1.7：账号级回绝（401/402/403/404）的熔断 =====
+        // 为什么要单独一条路（2026-10-12 那一局的实测形状）：模型名不存在 / 余额不足 / key 失效这一类失败，
+        // 旧写法是「把熔断计数直接推到上限，然后每条文本照旧各发一次请求」—— 于是一次坏配置在几秒内刷出
+        // 满屏 `[ERROR] [引擎] 请求失败`，每条还各歇 5 秒，玩家看到的就是「第一次测试/翻译就刷一屏错」。
+        // 这些失败的共同点是【换一条文本、立刻再试都不会变好】，所以正确做法是整条链先停下来：
+        // 歇 30 秒 → 60 秒 → 120 秒 → 封顶 5 分钟，期间一条请求都不发，文字全部留在队列里（不烧重试预算）。
+        // 玩家修好 key/模型/引擎后点一下「保存设置并翻译」，这条链立刻解除（PersistSettingsOnly → ResetBackoff）。
+        private const int EngineBreakerCapMs = 300000;
+        private const int BreakerLogEveryMs = 60000;      // 同一档位的熔断日志每分钟最多一条
+        private static int _breakerStreak;                // 连续第几次被账号级回绝
+        private static volatile int _breakerLogStreak;
+        private static int _breakerLogTick;
+
         // ===== v1.1.4：退避记账【分前台 / 世界两档】 =====
         // 为什么必须分：世界文字（路名/区名）天然是一大坨 —— 进一趟存档动辄几千条，全挤在同一条链上
         // 撞限流。而 0.5 秒前刚把退避做成"全局一份"的后果就是玩家 2026-10-02 报的那句
@@ -366,11 +379,63 @@ namespace Cs2AutoTranslator
         // 一条文本翻成功了：这一档的连续失败计数清零、间距往回收。
         // 顺带把"连续限流第几次"也收回 —— 间距都已经回到地板了，说明这一程是真通畅了，
         // 下次再撞 429 应当重新按"第一次"只歇 3 秒，而不是继续用上次风暴留下的封顶档。
+        // v1.1.7：熔断计数（_breakerStreak）也在这里收回 —— 翻得成说明 key/模型这一刻是好的。
         private static void ResetFailStreak(bool world)
         {
             Interlocked.Exchange(ref _failStreak[Tier(world)], 0);
+            Interlocked.Exchange(ref _breakerStreak, 0);
             EasePace(world);
             if (!world && PaceMsFor(false) <= PaceMinMs) Interlocked.Exchange(ref _rateStreak, 0);
+        }
+
+        // ===== v1.1.7：玩家明确动作之后解除全部退避 =====
+        // 点「保存设置并翻译」、点「测试」、拉模型列表、换引擎/换厂商都走这里（它们都经过 PersistSettingsOnly）。
+        // 没有这一条，玩家修好 key 之后还要干等熔断剩下的几分钟 —— 那正是"我已经改好了，怎么还没反应"。
+        //  deliberately 也贪心：顺手把已判死的文本复活不在这一步做（那是 TransMap.Reset 的事， SaveNow 会做）。
+        internal static void ResetBackoff()
+        {
+            Interlocked.Exchange(ref _failStreak[FRONT], 0);
+            Interlocked.Exchange(ref _failStreak[WORLD], 0);
+            Interlocked.Exchange(ref _breakerStreak, 0);
+            Interlocked.Exchange(ref _rateStreak, 0);
+            Interlocked.Exchange(ref _cooldownUntil, 0);
+            Interlocked.Exchange(ref _worldCooldownUntil, 0);
+            _pace[FRONT] = PaceMinMs; _pace[WORLD] = PaceMinMs;
+            Interlocked.Exchange(ref _goodRun[FRONT], 0);
+            Interlocked.Exchange(ref _goodRun[WORLD], 0);
+            Patches.MarkerEnabled = true;
+        }
+
+        // 打开熔断：两档冷却一起推（端点已经不认我们这个 key/模型了，世界文字继续冲也只是把同一堵墙撞得更响），
+        // 并给一行"说清了是什么问题、要去改什么、多久之后自己再试"的日志。待翻译文字由调用方按弹回账处理。
+        private static void OpenBreaker(int status, string engineName)
+        {
+            int streak = Interlocked.Increment(ref _breakerStreak);
+            int ms = EngineKit.BreakerCooldownMs(streak, EngineBreakerCapMs);
+            int until = Environment.TickCount + ms;
+            for (int cur = Volatile.Read(ref _cooldownUntil); until > cur; cur = Volatile.Read(ref _cooldownUntil))
+                if (Interlocked.CompareExchange(ref _cooldownUntil, until, cur) == cur) break;
+            for (int cur = Volatile.Read(ref _worldCooldownUntil); until > cur; cur = Volatile.Read(ref _worldCooldownUntil))
+                if (Interlocked.CompareExchange(ref _worldCooldownUntil, until, cur) == cur) break;
+            // 端点已知不可用：别再给还没翻的文字挂「…」—— 挂上也不会消失，玩家眼里就是"卡住了"。
+            Patches.MarkerEnabled = false;
+            LogBreaker(streak, ms, status, engineName);
+        }
+
+        private static void LogBreaker(int streak, int ms, int status, string engineName)
+        {
+            int now = Environment.TickCount;
+            // 同一档位每分钟最多一条：熔断期间本来就没有请求，能走到这里说明刚好到期又撞了一次。
+            if (streak == _breakerLogStreak && unchecked(now - _breakerLogTick) < BreakerLogEveryMs) return;
+            _breakerLogStreak = streak;
+            _breakerLogTick = now;
+            string who = string.IsNullOrEmpty(engineName) ? "当前引擎" : "「" + engineName + "」";
+            ModLog.Warn("[引擎] " + who + " 被服务端直接回绝（HTTP " + status + "）："
+                        + (EngineKit.DescribeStatus(status) ?? "详见上一条日志") + "。"
+                        + "这不是网络抖动 —— 换一条文字、立刻再试都是同样结果，所以本模组先停 " + (ms / 1000) + " 秒："
+                        + "期间一个请求都不发、界面保留原文、也不再挂「…」标记。"
+                        + "去选项里换模型 / 换 key / 换引擎，然后点「保存设置并翻译」立刻恢复。"
+                        + (streak > 1 ? "（这已是连续第 " + streak + " 次，下一次会歇更久。）" : ""));
         }
 
         // 单条与批量共用的"这条为什么没翻成"分流。connFail = 失败发生在【连接层】（没拿到任何 HTTP 响应）。
@@ -380,14 +445,25 @@ namespace Cs2AutoTranslator
         // 文本自身翻不成（引擎回空、账号级回绝）仍然按次数判死，否则一条坏文本会拖着整条队列。
         // v1.1.4：world = 这条源文本是不是【世界文字】（路名/区名）。退避与熔断计数从此分档记账，
         // 因为世界文字天生是一大坨：它撞的墙不许把玩家眼前那一屏一起冻住（用户 2026-10-02 报的就是这个形状）。
-        private static void OnFailure(string src, int status, bool connFail, bool world, int gen)
+        // v1.1.7：账号级回绝（401/402/403/404）从"每条各试一次"改成【开熔断】—— 那条失败换一条文本也不会好，
+        // 继续发请求只是在刷一屏错。见 OpenBreaker 上方那段实测凭据。
+        private static void OnFailure(string src, int status, bool connFail, bool world, int gen, string engineName)
         {
-            int i = Tier(world);
-            int n = Interlocked.Increment(ref _failStreak[i]);
             // v1.1.5：这条文本自己还要不要 —— 全局那几笔账（退避、熔断、日志）照记，
             // 因为限流/出口不通是【服务端与本机】的事实，与"玩家清没清缓存"无关；
             // 但这一条不再退回队列，也不再烧它的重试预算。
             bool stale = !EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp);
+
+            if (EngineKit.IsPermanentStatus(status))
+            {
+                OpenBreaker(status, engineName);
+                if (stale) DropStale(src);
+                else TransMap.NoteTransient(src);      // 留在队里，不烧预算：修好之后点保存就原样重试
+                return;
+            }
+
+            int i = Tier(world);
+            int n = Interlocked.Increment(ref _failStreak[i]);
 
             if (status == 429)
             {
@@ -433,9 +509,30 @@ namespace Cs2AutoTranslator
                             + "后续每条只试一次并歇 5 秒，先让界面按已翻好的部分刷新（修好 key/换引擎后点保存或重新翻译即可重来）。");
 
             if (stale) DropStale(src);
-            else TransMap.NoteFailure(src, dead ? 1 : TransMap.MaxAttempts);
+            else LogGivenUp(src, TransMap.NoteFailure(src, dead ? 1 : TransMap.MaxAttempts));
             if (dead) Thread.Sleep(5000);
             else Thread.Sleep(Math.Min(2000, 400 * n));
+        }
+
+        // 判死日志的节流戳。一条坏文本一行"[重试] …没翻成"是有用的Diagnostics，
+        // 但一次坏配置会把整屏文字各判死一次，不节流就是几百行，把真正有用的那几行埋掉。
+        private static int _givenUpLogTick;
+        private static int _givenUpSuppressed;
+
+        // 与 EngineBase.Fail 的节流同一套口径：写一条、把攒下的省略数一起带上。
+        private static void LogGivenUp(string src, int n)
+        {
+            if (n > 0) return;                       // 还没判死，那一条由 NoteFailure 内部记账，不进日志
+            int now = Environment.TickCount;
+            if (unchecked(now - _givenUpLogTick) < 20000)
+            {
+                Interlocked.Increment(ref _givenUpSuppressed);
+                return;
+            }
+            int skipped = Interlocked.Exchange(ref _givenUpSuppressed, 0);
+            _givenUpLogTick = now;
+            ModLog.Warn("[重试] 「" + Probe.Trunc(src, 30) + "」这一局先保留原文（改设置、点保存或按重新翻译都会重试）。"
+                        + (skipped > 0 ? "（同样的结局已省略 " + skipped + " 条）" : ""));
         }
 
         // 撞限流之后歇多久 —— 由 EngineKit 那把纯函数梯子给（3 → 6 → 10 → 封顶 20 秒）。
@@ -590,22 +687,31 @@ namespace Cs2AutoTranslator
             }
 
             int ok = 0, bad = 0;
-            // v1.1.2：这批是【被外部条件挡掉的】（限流 or 连接不通）还是【这些文字自己翻不成】，处置完全相反。
-            // 外部条件 ⇒ 整批走 TransMap.NoteTransient，不烧每条的重试预算（旧写法一批 12 条一次全废就是
-            // 12 条各扣一次机会，两次限流风暴就够把一整屏判死 —— 玩家看到的「框里 6、7 个选项只翻一半」）；
-            // 自己翻不成 ⇒ 仍按次数判死（引擎回空、账号级回绝、熔断已触发时每条只试一次就放过）。
-            bool external = status == 429 || connFailBatch;
-            // 账号级回绝或熔断已触发时，每条只试一次就放过，别让一整批 12 条一起拖着队列。
-            bool dead = !external
-                        && (EngineKit.IsPermanentStatus(status) || Volatile.Read(ref _failStreak[Tier(world)]) + 1 >= DeadEndpointAfter);
+            // v1.1.2：这批是【被外部条件挡掉的】（限流 / 连接不通 / 账号级回绝）还是【这些文字自己翻不成】，
+            // 处置完全相反。
+            //   · 外部条件 ⇒ 整批走 TransMap.NoteTransient，不烧每条的重试预算（旧写法一批 12 条一次全废就是
+            //     12 条各扣一次机会，两次限流风暴就够把一整屏判死 —— 玩家看到的「框里 6、7 个选项只翻一半」）；
+            //   · 自己翻不成 ⇒ 仍按次数判死（引擎回空、连续失败到熔断线时每条只试一次就放过）。
+            // v1.1.7：账号级回绝并进"外部条件"。它换一条文本也不会好，正确处置是熔断（见 OnBatchFailure）；
+            // 旧写法在这里把整批 12 条各判死，是"一次坏配置就把玩家眼前那一屏永久打成原文"的直接原因。
+            bool permanentBatch = EngineKit.IsPermanentStatus(status);
+            bool external = status == 429 || connFailBatch || permanentBatch;
+            bool dead = !external && Volatile.Read(ref _failStreak[Tier(world)]) + 1 >= DeadEndpointAfter;
+            // 日志要说实话：这 12 条到底是"退回重试"还是"这一局先跳过"，两种结局对玩家的动作完全不同。
+            string badWhy = external ? "被外部条件挡下，已保留重试预算，稍后自动补"
+                          : dead ? "这一局先跳过（服务端直接回绝，换 key/模型/引擎后点保存或重新翻译即可重试）"
+                          : "退回单条重试";
             for (int i = 0; i < todo.Count; i++)
             {
                 string tr = parts[i] == null ? null : TransGuard.Unmask(parts[i], guards[i]);
                 if (string.IsNullOrEmpty(tr))
                 {
                     // 外部条件挡掉的 ⇒ 弹回队列、不烧预算（弹回满 KMaxTransient 次才降级成普通失败）。
-                    if (external) { if (TransMap.NoteTransient(todo[i]) == 0) TransMap.NoteFailure(todo[i], TransMap.MaxAttempts); }
-                    else TransMap.NoteFailure(todo[i], dead ? 1 : TransMap.MaxAttempts);
+                    if (external)
+                    {
+                        if (TransMap.NoteTransient(todo[i]) == 0) LogGivenUp(todo[i], TransMap.NoteFailure(todo[i], TransMap.MaxAttempts));
+                    }
+                    else LogGivenUp(todo[i], TransMap.NoteFailure(todo[i], dead ? 1 : TransMap.MaxAttempts));
                     bad++;
                     continue;
                 }
@@ -615,13 +721,13 @@ namespace Cs2AutoTranslator
 
             if (bad > 0)
             {
-                if (ok == 0) OnBatchFailure(status, connFailBatch, world);   // 整批全废才算一次全局失败（约束③）
-                else Interlocked.Increment(ref _failStreak[Tier(world)]);    // 部分对上：接口是活的，只记一笔、不拖慢后面的批次
+                if (ok == 0) OnBatchFailure(status, connFailBatch, world, engine.Name);   // 整批全废才算一次全局失败（约束③）
+                else if (!permanentBatch) Interlocked.Increment(ref _failStreak[Tier(world)]);    // 部分对上：接口是活的，只记一笔、不拖慢后面的批次
             }
             else ResetFailStreak(world);
 
             if (ok > 0) { _uiDirty = true; RefreshUi(false); }
-            ModLog.Info("[批量] 一次请求 " + todo.Count + " 条：对上了 " + ok + " 条，" + bad + " 条退回单条重试"
+            ModLog.Info("[批量] 一次请求 " + todo.Count + " 条：对上了 " + ok + " 条，" + bad + " 条" + badWhy
                         + (raw == null ? "（接口没返回）" : "（模型没按编号回的行会被判对不齐，不会错配）") + "。");
             Thread.Sleep(PaceMsFor(world));
             return true;
@@ -630,13 +736,14 @@ namespace Cs2AutoTranslator
         // 整批全废的收尾：与 OnFailure 共用同一份全局计数和冷却，但【不碰 TransMap】——
         // 这批每一条已经在上面的循环里各自记账过了，这里只负责「要不要退避、退避多久、要不要换出口」。
         // 单条失败日志里那句人话也不用重复：这批退回单条后，单条路径会自己去撞同一次失败并写日志。
-        private static void OnBatchFailure(int status, bool connFail, bool world)
+        // v1.1.7：账号级回绝（401/402/403/404）改走熔断，不再走"把计数推到上限、每条各试一次"那条老路。
+        private static void OnBatchFailure(int status, bool connFail, bool world, string engineName)
         {
+            if (EngineKit.IsPermanentStatus(status)) { OpenBreaker(status, engineName); return; }
             int i = Tier(world);
             int n = Interlocked.Increment(ref _failStreak[i]);
             if (status == 429) { NoteRateLimited(world); SlowPace(world); return; }
             if (connFail) { PushCooldown(ConnectCooldownMs, world); Thread.Sleep(Math.Min(2000, 400 * n)); return; }
-            if (EngineKit.IsPermanentStatus(status)) Interlocked.Exchange(ref _failStreak[i], DeadEndpointAfter);
             bool dead = Volatile.Read(ref _failStreak[i]) >= DeadEndpointAfter;
             Thread.Sleep(dead ? 5000 : Math.Min(2000, 400 * n));
         }
@@ -756,10 +863,15 @@ namespace Cs2AutoTranslator
                               + "如果开着代理/VPN 而它已退出，系统代理却还指着那个端口 —— 要么把代理重新打开，"
                               + "要么在 Windows 的「Internet 选项 → 局域网设置」里取消代理。本模组已经自动试过另一条出口（走代理 ↔ 直连）。"
                             : EngineKit.DescribeStatus(testStatus);
+                        // v1.1.7：账号级回绝（401/402/403/404）时把后台翻译也停下来。
+                        // 测试按钮是玩家唯一的诊断入口，它都说"这个 key/模型不能用"了，后台再每条各试一次
+                        // 只是在刷一屏错 —— 与 TranslateLoop 撞到同一类失败时走的是同一条熔断（OpenBreaker）。
+                        bool refused = !testConnFail && EngineKit.IsPermanentStatus(testStatus);
+                        if (refused) OpenBreaker(testStatus, engine.Name);
                         result = string.IsNullOrEmpty(trans)
                             ? $"✗ 「{engine.DisplayName}」请求没成功："
                               + (why ?? "模型可能已下架或额度不足（点上方「获取模型列表」会自动改用可用的免费模型），也可能是网络/key 不对")
-                              + "。详见日志。"
+                              + (refused ? "。后台翻译已随之暂停，修好后点「保存设置并翻译」立刻继续。" : "。详见日志。")
                             : $"✓ 「{engine.DisplayName}」服务连通正常（'{probe}' → '{trans}'）。";
                     }
                 }
@@ -958,6 +1070,10 @@ namespace Cs2AutoTranslator
                 bool ok = SettingsStore.Save(setting);
                 if (ok) NoteSaved(setting);   // 反馈6：玩家自己存过一次，静默存盘就要认这个新基线，别 20 秒后又写一遍
                 Patches.SyncSettings();  // 把总开关/范围/目标语言/引擎镜像到热路径静态字段（需求8/2）。
+                // v1.1.7：玩家刚刚做过一个明确动作（保存/测试/拉列表/换引擎换厂商）⇒ 解除全部退避。
+                // 没有这一条，玩家修好 key 之后还要干等熔断剩下的几分钟，看到的就是"我已经改好了却没反应"。
+                // 引擎仍然是坏的话，下一条请求会立刻重新开一次熔断（streak 从 1 起，只歇 30 秒）。
+                ResetBackoff();
                 RegisteredModIds.Invalidate();   // 范围分类用到的模组 id 列表刷新一次。
                 ModLog.Info($"[范围] 已注册模组 id：{RegisteredModIds.Get().Length} 个（0 个说明注入失效，「模组选项及说明」会静默不翻）。");
                 TranslatorSetting.LastSaveResult = ok
@@ -1636,7 +1752,8 @@ namespace Cs2AutoTranslator
         private static Type _optionsType;
         private static bool _optionsTypeSearched;
 
-        private static void RefreshOptionsPage()
+        // internal：v1.1.7 起「档位」那一行的显隐也要走它（设置类只记一个标记，由 DropdownL10n.Tick 带过来）。
+        internal static void RefreshOptionsPage()
         {
             try
             {
@@ -1648,7 +1765,6 @@ namespace Cs2AutoTranslator
             }
             catch { }
         }
-
         // 向 ECS 世界要 OptionsUISystem 的实例（只能在主线程调）。任何一步拿不到就返回 null，调用方静默跳过。
         // internal 而不是 private：v1.0.5 的下拉框扫描器（DropdownL10n）走同一棵树，不复用就得再维护一份
         // 「游戏版本改了怎么找这个系统」的逻辑 —— 那种平行表正是本文件注释里反复抱怨的东西。
@@ -2207,6 +2323,12 @@ namespace Cs2AutoTranslator
         //      周期热路径上只做与"有没有变化"有关的事）。
         public static void Tick()
         {
+            // v1.1.7：「思考强度」从关拨到开时，下面的「档位」行要当场现身。显隐只有 RefreshPage 重算，
+            // 而拨下拉框本身不触发它 —— 这里把设置类记下的标记带走（不碰译文表、不发请求、不清图层）。
+            if (TranslatorSetting.ConsumeShapeChanged())
+            {
+                try { Patches.RefreshOptionsPage(); } catch { }
+            }
             int now = Environment.TickCount;
             if (now - _lastTick < ScanIntervalMs) return;
             _lastTick = now;
@@ -3112,6 +3234,8 @@ namespace Cs2AutoTranslator
         // 反馈7：这条又失败了一次。未到上限退回队列（返回值就是第几次失败，调用方据此决定退避多久）；
         // 到上限就判死：不再入队、界面保留原文，返回 0，调用方应把全局退避清零 —— 别让一条坏文本
         // 把后面所有正常文本一起拖慢。maxAttempts 由调用方给：端点像是已经死了时压到 1，逐条只试一次就放过。
+        // v1.1.7：判死那行日志从这里挪到了 Mod.LogGivenUp（要节流）—— 原来的行首是「[重试]」，
+        // 一次坏配置会把整屏文字各判死一次，不节流就是几百行，把真正有用的那几行埋掉。
         public static int NoteFailure(string src, int maxAttempts = MaxAttempts)
         {
             int n = Attempts.AddOrUpdate(src, 1, (_, v) => v + 1);
@@ -3120,8 +3244,6 @@ namespace Cs2AutoTranslator
             Attempts.TryRemove(src, out _);
             Queued.TryRemove(src, out _);
             DecrementInFlight();
-            ModLog.Warn("[重试] 「" + Probe.Trunc(src, 30) + "」第 " + n + " 次没翻成，本局先保留原文"
-                        + "（改设置、点保存或按重新翻译都会重试）。");
             return 0;
         }
 
@@ -4060,7 +4182,9 @@ namespace Cs2AutoTranslator
                     foreach (string v in CustomAi.Vendors)
                     {
                         if (EngineKit.ThinkingSlot(e, v) < 0) continue;    // 第九轮：千问这一格没有可调档位，也不占存盘键
-                        Str(sb, "VendorThinking_" + v, s.GetThinking(e, v).ToString());
+                        // v1.1.7：不发送就写空串。读回来空串同样判"不发送"，所以不必另立哨兵值，
+                        // 也不必新增磁盘字段（老盘的 Off/Low/High 原样照读，见 PutThinkingWire）。
+                        Str(sb, "VendorThinking_" + v, s.ThinkingWire(e, v));
                     }
                 }
                 else if (EngineKit.ShowField(e, "thinking")) Str(sb, "EngineThinking_" + e, s.GetThinking(e, null).ToString());
@@ -4088,7 +4212,10 @@ namespace Cs2AutoTranslator
                     {
                         string raw = Str(json, "VendorThinking_" + v);
                         if (raw.Length == 0 && curEngine == "Custom" && v == curVendor) raw = legacy;
-                        s.PutThinking(e, v, ParseThinking(raw));
+                        // v1.1.7：空串 = 不发送（新玩家默认就是这样）；非空 = 发送 + 那一档。
+                        // 老盘写的 "Off" 走到这里会置成 发送 + Off，而 Off 在每个 *Field 里与 None 行为完全一致
+                        // ⇒ 升级玩家的请求体一字不变，界面上也只是 Off 变成 None。
+                        s.PutThinkingWire(e, v, raw);
                     }
                 }
                 else if (EngineKit.ShowField(e, "thinking"))
@@ -4507,6 +4634,10 @@ namespace Cs2AutoTranslator
         }
 
         // 统一失败出口：把服务端 body 里的原因也捞出来（只看 ex.Message 只会得到一句 "(400) Bad Request"）。
+        // v1.1.7：同一颗引擎的同一句失败在 60 秒内只认真记一条，其余计数后一并省略。
+        // 为什么要节流：模型名不存在/余额不足这类配置错误，旧写法会让 5 条工作线程在一个节流周期里各刷一条
+        // `[ERROR] [引擎] 请求失败`（实机一局 44 条 ERROR + 约 200 条 [重试]），真正有用的一行被埋掉。
+        // 状态码与 body 仍会出现在第一条上，所以诊断信息一条都没少。
         protected string Fail(Exception ex)
         {
             string body = Http.ErrorBody(ex);
@@ -4515,11 +4646,38 @@ namespace Cs2AutoTranslator
             // 「被限流」「账号没余额」「本机出口不通」是三种不同的处置（前两种重试才有意义，第三种要换出口），
             // 而它们在 ex.Message 里长得很像，只有 WebException.Status 分得开。判据见 Http.IsConnectionFailure。
             _lastConnectFail = Http.IsConnectionFailure(ex);
-            ModLog.Error("[" + Name + "] 请求失败"
-                + (_lastConnectFail ? "（连接层就没通，当前出口＝" + Http.EgressName + "，系统代理＝" + (Http.ProxyHint() ?? "?") + "）" : "")
-                + ": " + ex.Message
-                + (string.IsNullOrEmpty(body) ? "" : " | 服务端：" + Probe.Trunc(body, 300)));
+            LogFailure(Name, _lastStatus, _lastConnectFail, ex, body);
             return null;
+        }
+
+        private const int FailThrottleMs = 60000;
+        private static readonly object s_failLogLock = new object();
+        private static string s_failLogKey = "";
+        private static int s_failLogTick;
+        private static int s_failSuppressed;
+
+        private static void LogFailure(string engine, int status, bool connFail, Exception ex, string body)
+        {
+            // key 里带上状态码与连接层标志：「这一家 429」和「这一家 404」是两件事，不能互相省略。
+            string key = engine + "|" + status + "|" + connFail + "|" + (ex == null ? "" : ex.Message);
+            lock (s_failLogLock)
+            {
+                int now = Environment.TickCount;
+                if (key == s_failLogKey && unchecked(now - s_failLogTick) < FailThrottleMs)
+                {
+                    s_failSuppressed++;
+                    return;
+                }
+                int skipped = s_failSuppressed;
+                s_failSuppressed = 0;
+                s_failLogKey = key;
+                s_failLogTick = now;
+                ModLog.Error("[" + engine + "] 请求失败"
+                    + (connFail ? "（连接层就没通，当前出口＝" + Http.EgressName + "，系统代理＝" + (Http.ProxyHint() ?? "?") + "）" : "")
+                    + ": " + (ex == null ? "?" : ex.Message)
+                    + (string.IsNullOrEmpty(body) ? "" : " | 服务端：" + Probe.Trunc(body, 300))
+                    + (skipped > 0 ? "（同类失败已省略 " + skipped + " 条）" : ""));
+            }
         }
 
         // 反馈1/2：最近一次失败的 HTTP 状态码（0 = 这次没拿到响应，纯网络问题/超时）。
@@ -5081,11 +5239,13 @@ namespace Cs2AutoTranslator
             // 第八轮：思考强度按厂商分格，所以跟着上面那颗 vendor 一起定下来。读「当前格」的话，
             // 请求在飞的几百毫秒里玩家切了厂商，这一档就会跑到别家那一格去。
             // 第九轮：Off 不再等于「一个字段都不发」——该发什么由 CustomAi.ThinkingField 按这一家 + 这个模型名决定。
+            // v1.1.7：这一行在界面上拆成「发不发」+「发哪一档」两行，所以档位可能是空串（玩家选了不发送），
+            // 空串进 ThinkingField  ⇒ 一个思考字段都不写，请求体与「这一格压根不存在」逐字一致。
             string model = s.EffectiveModel;
             string langName = Lang.ForAiPrompt(toLocale);
             int extra;
             string thinking = CustomAi.ThinkingField(nameof(TranslatorSetting.Engine.Custom), vendor, protocol, model,
-                s.GetThinking(nameof(TranslatorSetting.Engine.Custom), vendor).ToString(), out extra);
+                s.ThinkingWire(nameof(TranslatorSetting.Engine.Custom), vendor), out extra);
             try
             {
                 // gemini 格式的模型名与 key 都在 URL 里、anthropic 走 x-api-key + 版本头、其余一律 Bearer ——

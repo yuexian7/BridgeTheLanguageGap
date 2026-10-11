@@ -470,7 +470,7 @@ namespace Cs2AutoTranslator
                 int waitMs = NoteRateLimited(world);
                 SlowPace(world);
                 if (stale) DropStale(src);
-                else if (TransMap.NoteTransient(src) == 0) TransMap.NoteFailure(src, TransMap.MaxAttempts);
+                else if (TransMap.NoteTransient(src) == 0) LogGivenUp(src, TransMap.NoteFailure(src, TransMap.MaxAttempts));
                 if (n == 1)
                     ModLog.Warn("[限流] " + EngineKit.DescribeStatus(429) + "："
                                 + (world ? "世界文字（路名/区名）这一档先歇 " : "界面文字这一档先歇 ")
@@ -491,7 +491,7 @@ namespace Cs2AutoTranslator
                                 + "本模组已自动改用另一条出口（走代理 ↔ 直连）重试，之后仍不通就保留原文继续排队，"
                                 + "出口一恢复自己补完，不用重启游戏。");
                 if (stale) DropStale(src);
-                else if (TransMap.NoteTransient(src) == 0) TransMap.NoteFailure(src, TransMap.MaxAttempts);
+                else if (TransMap.NoteTransient(src) == 0) LogGivenUp(src, TransMap.NoteFailure(src, TransMap.MaxAttempts));
                 Thread.Sleep(Math.Min(2000, 400 * n));
                 return;
             }

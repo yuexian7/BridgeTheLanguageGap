@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace Cs2AutoTranslator
 {
@@ -486,15 +487,38 @@ namespace Cs2AutoTranslator
         }
 
         // 目标语言的母语名，直接进 AI 提示词（LanguageCatalog 已有现成的，不再手抄一份表）。
+        //
+        // v1.1.7 性能：这里原来是【每次调用】都拿 Norm(lang.code) 去线性扫 44 条，而 Norm 每次都要
+        // new 一个 StringBuilder + new 一个串 ⇒ 一次调用 88 个小对象。它的调用方是 Lang.ForAiPrompt(target)，
+        // 而后者写在每个 AI 引擎的 Translate 里（Mod.cs 单条/批量两条链）⇒ 【每一个 AI 请求一次】。
+        // 5 路并发、一局几千个请求就是几十万个小对象进 gen0。
+        // 目录是编译期常量（LanguageCatalog.All 是 readonly 数组），这件事与"有没有变化"无关，
+        // 所以进程级只做一次：静态构造里把 Norm(code) → 母语名 填成一张表，这里退化成最多两次查表。
+        // 与 §10-81 治过的三处（RegisteredModIds 节流 / ClassifyMemo / ReadObj 缓存）是同一种病的同一个修法。
+        //
+        // ⚠ 表里存的必须是 Norm(lang.code) 本身，而不是它的 base：pt-BR 与 pt 在目录里是两个不同的显示名
+        //   （"Português (Brasil)" / "Português"），第二趟查表吃的正是 Base(locale) 这个【已经剥掉地区】的键，
+        //   所以 "pt-XX" 这种目录里没有的写法会剥成 "pt" 命中后者 —— 与旧的两次 foreach 逐格等价。
+        //   （若这里改成"按 Base(lang.code) 建键、先到先得"，"pt" 会被 All[9] 的 pt-BR 抢占，行为就变了。）
+        private static readonly Dictionary<string, string> s_nativeName;
+
+        static Lang()
+        {
+            var table = new Dictionary<string, string>(LanguageCatalog.All.Length);
+            for (int i = 0; i < LanguageCatalog.All.Length; i++)
+            {
+                string key = Norm(LanguageCatalog.All[i].code);
+                if (!table.ContainsKey(key)) table[key] = LanguageCatalog.All[i].name;   // 同键取先出现的，与 foreach 顺序一致
+            }
+            s_nativeName = table;
+        }
+
         public static string NativeName(string locale)
         {
-            string n = Norm(locale);
-            foreach (var lang in LanguageCatalog.All)
-                if (Norm(lang.code) == n) return lang.name;
+            string name;
+            if (s_nativeName.TryGetValue(Norm(locale), out name)) return name;
             // 游戏当前语言可能是 en-US 这种带地区的写法，目录里只有 en：按 base 再找一次。
-            string b = Base(locale);
-            foreach (var lang in LanguageCatalog.All)
-                if (Norm(lang.code) == b) return lang.name;
+            if (s_nativeName.TryGetValue(Base(locale), out name)) return name;
             return string.IsNullOrEmpty(locale) ? "English" : locale;
         }
 
@@ -689,6 +713,96 @@ namespace Cs2AutoTranslator
 
         // AI 引擎（Gemini/Groq/OpenRouter/SiliconFlow/自定义）不需要语言码，提示词里直接写母语名。
         public static string ForAiPrompt(string locale) => NativeName(locale);
+    }
+
+    // ===== 谷歌两条免 key 通道的降级状态机（v1.1.7 稳定性 + 离线可测性）=====
+    // 为什么搬进本文件：这套「网页通道连失败 3 次就先别再走它、之后攒够 50 条再探一次；备用通道粘住上一次
+    // 成功的那个 client×域名组合」的判断，今天【只有一次真机点击的证据】、一条自动断言都没有（§5 欠了很久的那条），
+    // 而它同时是 5 条工作线程共用的可变状态。留在 Mod.cs 的 GoogleEngine 里离线壳碰不到 —— §10-29：
+    // 一个类只要在声明处引用了游戏类型，加载类型时就抛 TypeLoadException，方法体再纯也够不着。
+    // 搬过来之后本文件仍是纯 BCL：阶梯与判据能进 T3，计数器也一律走 Interlocked / Volatile
+    // （S2 那半个问题——普通 static int 被并发 ++ 丢更新，导致"谷歌在按出口 IP 拦你"那两行日志可能一次都不打——
+    //  就在这一次一起治掉，不是先改 Interlocked 再另搬一次）。
+    // ⚠ 这个类【不发请求、不打日志】：它只回答"这一次走哪条通道""这一行该不该打""这一趟该试哪个组合"，
+    //   I/O 与文案留在 GoogleEngine。失败模式因此天然是"少走一条通道 / 少打一行日志"，炸不到游戏。
+    internal sealed class GoogleChannels
+    {
+        // 通道①（网页版 batchexecute）连续失败到这个次数就先别再走它 —— 每条文本都白等一轮超时太浪费。
+        // 但不永久放弃：之后每 WebProbeEvery 条再探一次。玩家换个节点、或谷歌哪天把这个出口 IP 放出来，
+        // 模组自己会走回第一顺位，不需要重开游戏。
+        public const int WebGiveUpAfter = 3;
+        public const int WebProbeEvery = 50;
+
+        private int _webFails;          // 通道①连败次数（成功即清零）
+        private int _webSkipped;        // 放弃之后攒了几条没走它
+        private int _lastWebStatus;     // 只给日志看：0 = 这次压根没拿到响应（超时/DNS/连接被重置）
+        private int _clientIndex;       // 上一次成功的 client 下标（粘住它们，免得每条文本都从头白试一遍，每个组合 8 秒超时）
+        private int _hostIndex;         // 上一次成功的域名下标
+
+        public int WebFails => Volatile.Read(ref _webFails);
+        public int LastWebStatus => Volatile.Read(ref _lastWebStatus);
+
+        // 这一次要不要走通道①：没到放弃阈值就走；已经放弃了就靠"攒够条数"探一回，攒够那一格当场清零
+        //（旧写法 `!tryWeb && ++_webSkipped >= WebProbeEvery` 就是这个形状：通道健康时这一格一直躺在 0，
+        //  不会因为多读一次就把探活窗口挪走）。
+        // 已知取舍：5 条线程可能同一轮里都越过阈值 ⇒ 同一窗口连探两三次而不是一次。多探的代价是几条请求，
+        // 而少探的代价是"谷歌放开了也切不回去"，所以这一格宁可宽。旧写法在并发下同样有这个形状（还叠加丢更新）。
+        public bool ShouldAttemptWeb()
+        {
+            if (Volatile.Read(ref _webFails) < WebGiveUpAfter) return true;
+            if (Interlocked.Increment(ref _webSkipped) < WebProbeEvery) return false;
+            Interlocked.Exchange(ref _webSkipped, 0);
+            return true;
+        }
+
+        // 通道①翻成功了：两本账一起清零，返回【清零之前】的连败数（>0 ⇒ 调用方打一行"网页通道恢复"）。
+        public int NoteWebSuccess()
+        {
+            Interlocked.Exchange(ref _webSkipped, 0);
+            return Interlocked.Exchange(ref _webFails, 0);
+        }
+
+        // 通道①这一趟没成（200 但解不出译文，或干脆异常）：连败数 +1 并记下状态码，返回递增后的连败数。
+        // 返回值必须由调用方【原样拿去用】，不要再回头读 WebFails —— 那正是 S2 里丢更新的那只手。
+        public int NoteWebFailure(int status)
+        {
+            Volatile.Write(ref _lastWebStatus, status);
+            return Interlocked.Increment(ref _webFails);
+        }
+
+        // 「谷歌在按出口 IP 拦你」那行日志的两个落点：第一次失败（症状出现）与刚放弃（处置变了）。
+        // 每条文本刷一行会把真正有用的那几行埋掉，所以只钉这两档。
+        public static bool ShouldLogWebFailure(int failCountAfterIncrement)
+            => failCountAfterIncrement == 1 || failCountAfterIncrement == WebGiveUpAfter;
+
+        // 从"已经放弃"里恢复回来才值得打一行；一直健康时不该每批都喊一次。
+        public static bool ShouldLogWebRecovery(int failsBeforeSuccess) => failsBeforeSuccess > 0;
+
+        // 备用通道（translate_a）这一次该试哪个 client×域名组合：从【粘住的那一档】出发，
+        // 域名走得快、client 走得慢（旧写法就是 attempt / hosts）。返回 true = 这个组合与粘住的那一档不同，
+        // 调用方据此决定要不要打「已切到可用组合」那一行。
+        // 参数非法（hosts/clients <= 0）时一律给 0,0 并说"没变化"，让调用方的循环自然不成立，绝不抛。
+        public bool PickCombo(int attempt, int hosts, int clients, out int clientIndex, out int hostIndex)
+        {
+            int stickyClient = Volatile.Read(ref _clientIndex);
+            int stickyHost = Volatile.Read(ref _hostIndex);
+            if (hosts <= 0 || clients <= 0 || attempt < 0)
+            {
+                clientIndex = 0;
+                hostIndex = 0;
+                return false;
+            }
+            clientIndex = (stickyClient + attempt / hosts) % clients;
+            hostIndex = (stickyHost + attempt) % hosts;
+            return clientIndex != stickyClient || hostIndex != stickyHost;
+        }
+
+        // 某个组合真的翻出来了 ⇒ 记住它，下一条直接从这一档开始试（省掉一轮 8 秒超时的白试）。
+        public void AdoptCombo(int clientIndex, int hostIndex)
+        {
+            Interlocked.Exchange(ref _clientIndex, clientIndex);
+            Interlocked.Exchange(ref _hostIndex, hostIndex);
+        }
     }
 
     // ===== AI 翻译提示词 =====

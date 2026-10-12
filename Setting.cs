@@ -630,8 +630,8 @@ namespace Cs2AutoTranslator
         {
             for (int i = 0; i < VendorKey.Length; i++)
             {
-                VendorBaseUrl[i] = Mod.CleanKey(Slot(VendorBaseUrl, i));
-                VendorKey[i] = Mod.CleanKey(Slot(VendorKey, i));
+                VendorBaseUrl[i] = Keys.Clean(Slot(VendorBaseUrl, i));
+                VendorKey[i] = Keys.Clean(Slot(VendorKey, i));
             }
         }
 
@@ -1254,7 +1254,7 @@ namespace Cs2AutoTranslator
 
             // 唯一存储：自管 JSON（写在官方约定的 ModsSettings\Cs2AutoTranslator.json）。
             // 不用框架的 .coc 通道，是因为玩家现有的设置都在这份 JSON 里，换存储会静默丢配置；
-            // 且本模组的设置项带自定义事件回调（开关即时生效、key 需要 CleanKey 归一），自管更可控。
+            // 且本模组的设置项带自定义事件回调（开关即时生效、key 需要 Keys.Clean 归一），自管更可控。
             // 类上去掉 [FileLocation] 后，本模组不再读写任何 .coc；但框架退出时仍会把它库里那条历史记录
             // 原样回写成 <UserData>\Cs2AutoTranslator.coc（2026-09-06 实测，内容停在旧快照）—— 见类头注释。
             SettingsStore.Load(s);

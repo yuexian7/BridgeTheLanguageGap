@@ -651,4 +651,27 @@ namespace Cs2AutoTranslator
         }
     }
 
+    // ===== 凭据文本的清洗（v1.1.7 从 Mod.CleanKey 搬过来）=====
+    // 为什么搬：这颗是 v0.15 那次真 bug 的住址 —— 中文输入法会把不可见控制字符混进玩家粘进来的 key，
+    // `WebClient.Headers.Add` 当场报 "Specified value has invalid Control characters"（§10 第 19 条）。
+    // 方法体 100% 纯 BCL，可它原先住在 `class Mod` 里，而 Mod 在【声明处】就引用了游戏类型
+    //（`: IMod`）⇒ CLR 加载类型即失败，离线壳一个方法都调不到（§10 第 29 条点名的就是这一颗）。
+    // 搬进本文件之后它进得了 T3：洗多了一格（把 key 里合法的 `-`/`=` 洗掉）、洗漏了一格（留下 \u0007）
+    // 这两种错法从此先在离线断言里红，而不是等玩家在游戏里发现「我填的 key 明明是对的」。
+    // ⚠ Mod.cs / Setting.cs 里所有 Mod.CleanKey(...) 调用点已全部改口到 Keys.Clean(...)，本文件不留旧名，
+    //   避免出现两份会各自漂移的判据。§10 第 19 条里那句「CleanKey」现在指的是这一颗。
+    internal static class Keys
+    {
+        // 去掉控制字符（< 空格，以及 DEL \u007F）和首尾空白。输入法有时会把不可见字符混进 key。
+        // 判据只有一条：可打印字符留下、控制字符丢掉。空格留着是故意的 —— Azure region、
+        // 「Português (Brasil)」这类母语名本身就有空格，丢掉就把合法值洗成非法值（v0.15 那轮的对照组）。
+        public static string Clean(string k)
+        {
+            if (string.IsNullOrEmpty(k)) return k ?? string.Empty;
+            var sb = new StringBuilder(k.Length);
+            foreach (char c in k) if (c >= ' ' && c != '\u007F') sb.Append(c);
+            return sb.ToString().Trim();
+        }
+    }
+
 }

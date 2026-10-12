@@ -620,12 +620,22 @@ namespace Cs2AutoTranslator
         {
             var items = new List<string> { src };
             var deferred = new List<string>();
+            // v1.1.7 性能：「这条是不是已经抓在手上了」原来是 deferred.Contains 的 O(n) 线性扫
+            //（deferred 上限 48 项、内层最多转 12 圈 ⇒ 每批最多 576 次字符串比较，而且比对的是整句原文）。
+            // 换成 HashSet 一句话的事，顺带把去重范围摆正：旧写法只查 deferred，没查 items，
+            // 所以 src 自己（或已在批里的某条）再次被 TakeSameTier 捞上来时会被【塞进同一批两遍】——
+            // 编号协议按行号对齐不会翻错，但那条文本白占一格 12 分之一的批量额度。seen 一本账管两边。
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            seen.Add(src);
             while (items.Count < BatchKit.MaxItems)
             {
                 string more = TransMap.TakeSameTier(src, 0);   // 非阻塞，且只捞同一条队列：绝不把路名混进面板这一批
                 if (more == null) break;
-                if (BatchKit.CanBatch(more) && !deferred.Contains(more)) items.Add(more);
-                else deferred.Add(more);                   // 不能进批的先记下，等会儿整批退回，避免同一条被反复取放
+                if (seen.Add(more))                             // 第一次抓到才处置；重复抓到的直接忽略（它已经在 items 或 deferred 里）
+                {
+                    if (BatchKit.CanBatch(more)) items.Add(more);
+                    else deferred.Add(more);                   // 不能进批的先记下，等会儿整批退回，避免同一条被反复取放
+                }
                 if (deferred.Count >= BatchKit.MaxItems * 4) break;
             }
             foreach (string d in deferred) RequeueOrDrop(d, stamp);
@@ -925,7 +935,7 @@ namespace Cs2AutoTranslator
             PersistSettingsOnly();
             string name = setting.TranslationEngine.ToString();
             string vendor = setting.TranslationEngine == TranslatorSetting.Engine.Custom ? CustomAi.Normalize(setting.CustomVendor.ToString()) : null;
-            string key = Mod.CleanKey(setting.GetKeyFor(setting.TranslationEngine));
+            string key = Keys.Clean(setting.GetKeyFor(setting.TranslationEngine));
             string baseUrl = setting.TranslationEngine == TranslatorSetting.Engine.Custom
                 ? CustomAi.Base(vendor, setting.CustomBaseUrl)
                 : EngineKit.HostedBase(name);
@@ -1052,7 +1062,7 @@ namespace Cs2AutoTranslator
         {
             // 两个数组必须等长且一一对应（同一份字段清单的读写两面），长度不等就是漏改，直接跳过而不是错位赋值。
             if (KeyGetters.Length != KeySetters.Length) { ModLog.Error("[保存] 凭据字段读写表长度不一致，已跳过清洗。"); return; }
-            for (int i = 0; i < KeyGetters.Length; i++) KeySetters[i](s, CleanKey(KeyGetters[i](s)));
+            for (int i = 0; i < KeyGetters.Length; i++) KeySetters[i](s, Keys.Clean(KeyGetters[i](s)));
             // 反馈3：AI 厂商的接口地址/key 按厂商分了 9 格，上表一个字段一行塞不下，交给设置类自己整表洗。
             s.CleanVendorCredentials();
         }
@@ -1493,14 +1503,8 @@ namespace Cs2AutoTranslator
             catch (Exception ex) { ModLog.Error("[快捷键] 重新翻译失败: " + ex.Message); }
         }
 
-        // 去掉控制字符（< 空格，以及 DEL \u007F）和首尾空白。输入法有时会把不可见字符混进 key。
-        internal static string CleanKey(string k)
-        {
-            if (string.IsNullOrEmpty(k)) return k ?? string.Empty;
-            var sb = new StringBuilder(k.Length);
-            foreach (char c in k) if (c >= ' ' && c != '\u007F') sb.Append(c);
-            return sb.ToString().Trim();
-        }
+        // 去掉控制字符与首尾空白那件事搬到 TextKit.cs 的 Keys.Clean 了（v1.1.7）。
+        // 原来它待在这里，方法体 100% 纯 BCL 却因为 `class Mod : IMod` 的声明而进不了离线壳 —— §10 第 29 条点名的就是它。
 
         // v1.1.6：一次性引导用的主线程探针。把「本地化管理器是否就绪 + 当前语言」抄进
         // 托管静态字段（Patches.LocalizationReady / Patches.ActiveLocale），后台线程只等字段。
@@ -2172,7 +2176,8 @@ namespace Cs2AutoTranslator
                 TransMap.Enqueue(baseVal);            // 首次见到：入队后台翻译（入队的是干净原文，绝不含标记）。
                 if (!_firstEnqueueLogged) { _firstEnqueueLogged = true; ModLog.Info($"[Hook] 前缀已生效，首次入队待翻译文本：'{Probe.Trunc(baseVal, 40)}'（key={Probe.Trunc(key, 40)}）。"); }
                 // 静态待翻译标记：原文末尾加一个「…」表示「正在翻译」，翻好后连同标记一起原地变成译文。
-                if (MarkerEnabled) { data.Set(baseVal + PendingMarker); return false; }
+                // v1.1.7 性能：串走 TransMap.WithPendingMarker 的小表，同一条未翻文字不再每次取词都重拼一遍。
+                if (MarkerEnabled) { data.Set(TransMap.WithPendingMarker(baseVal, PendingMarker)); return false; }
                 return true;
             }
             catch { return true; }
@@ -3184,6 +3189,31 @@ namespace Cs2AutoTranslator
 
         public static bool TryGetTranslated(string src, out string tr) => Translated.TryGetValue(src, out tr);
 
+        // ===== v1.1.7 性能：「原文 + …」那半句待翻标记 =====
+        // Prefix 是【每一次界面取词】都要跑的钩子，而"给还没翻好的文字末尾挂个…"这一步每次都得新拼一个串
+        //（string + string ⇒ 一个 StringBuilder + 一个新 string）。玩家点开选项页会触发整屏重译，
+        // 一屏 100 条未翻文字就是 100 个新串；在选项页里来回走动时这件事反复发生，而同一条文字在翻好之前
+        // 每次取词都要再拼一遍。拼出来的内容对同一个 src 是恒定的（PendingMarker 是编译期常量 "…"），
+        // 所以照 Scope.ClassifyMemo 同一套路记进一张【有上限】的小表：命中即零分配，写满就停止写入
+        //（照常拼串，只是不进表），不让它无界增长。
+        // 强引用代价可控：最多 4096 个「原文+1 字符」的串，而这些原文本身已经作为 Translated/Resolved 的键活着；
+        // TransMap.Reset()（保存设置/清缓存/重新翻译）连这张表一起清，不会跨局留住没人再看的文字。
+        // ⚠ 这张表【不在纯文件里】（TransMap 住在 Mod.cs，与两条队列/在飞计数同生共死），所以它进不了 T3：
+        //   它的正确性靠"内容是 src 与常量的纯拼接"这一条结构保证，而不是靠断言 —— 加断言得先把整类搬出去，
+        //   那是比本轮更大的动作，本轮按 S3 的原始判据（约 8 行、纯缓存、行为不变）收口。
+        private const int kMaxMarked = 4096;
+        private static readonly ConcurrentDictionary<string, string> Marked = new ConcurrentDictionary<string, string>();
+
+        public static string WithPendingMarker(string src, string marker)
+        {
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(marker)) return src;
+            string marked;
+            if (Marked.TryGetValue(src, out marked)) return marked;
+            marked = src + marker;
+            if (Marked.Count < kMaxMarked) Marked.TryAdd(src, marked);
+            return marked;
+        }
+
         public static bool IsResolved(string src) => Resolved.ContainsKey(src) || Translated.ContainsKey(src) || GivenUp.ContainsKey(src);
 
         // 队列空且没有在飞的请求 = 真的闲下来了（反馈6 的首批刷新判据）。两条队列都算。
@@ -3364,6 +3394,9 @@ namespace Cs2AutoTranslator
             // 反馈7：判死是「本局」的决定，不能跨设置变更留着 —— 玩家换引擎/换语言/按重新翻译就是想再试一次。
             GivenUp.Clear();
             Transient.Clear();          // v1.1.2：外部条件（限流/出口不通）的弹回账同理，换引擎/修好网络后重新起算
+            Marked.Clear();             // v1.1.7：清缓存/换语言/重新翻译那一刻，别的表都不再引用这些原文了，
+                                        // 这张「原文 → 原文+…」的拼接表要是留着，就等于替游戏养着最多 4096 条
+                                        // 没人再看的文字。清掉不影响正确性（内容是纯拼接，重建一次就行）。
             Interlocked.Exchange(ref _inFlight, 0);
             ClearWorldNew();
             while (Pending.TryTake(out _)) { }
@@ -4000,9 +4033,9 @@ namespace Cs2AutoTranslator
         internal static bool LoadIncomplete;
         private static bool _refusalLogged;
 
-        // 字符串项统一过一遍 CleanKey：输入法混进来的不可见字符会让 key 校验失败，而肉眼看两者一模一样。
+        // 字符串项统一过一遍 Keys.Clean：输入法混进来的不可见字符会让 key 校验失败，而肉眼看两者一模一样。
         // 同时它也是【缺键安全】的读取口（Json.ReadString 取不到键返回 null，直接 .Length 就是 NRE）。
-        private static string Str(string json, string key) => Mod.CleanKey(Json.ReadString(json, key)) ?? string.Empty;
+        private static string Str(string json, string key) => Keys.Clean(Json.ReadString(json, key)) ?? string.Empty;
 
         public static void Load(TranslatorSetting s)
         {
@@ -4282,11 +4315,11 @@ namespace Cs2AutoTranslator
             bool freeform = s.TranslationEngine == TranslatorSetting.Engine.Custom
                             && s.CustomVendor == TranslatorSetting.AiVendor.custom;
             return EngineKit.MissingField(s.TranslationEngine.ToString(),
-                !string.IsNullOrEmpty(Mod.CleanKey(s.GetKeyFor(s.TranslationEngine))),
-                !string.IsNullOrEmpty(Mod.CleanKey(s.GetSecondFor(s.TranslationEngine))),
+                !string.IsNullOrEmpty(Keys.Clean(s.GetKeyFor(s.TranslationEngine))),
+                !string.IsNullOrEmpty(Keys.Clean(s.GetSecondFor(s.TranslationEngine))),
                 !string.IsNullOrEmpty(s.EffectiveModel),
-                !string.IsNullOrEmpty(Mod.CleanKey(s.CloudflareAccountId)),
-                !freeform || !string.IsNullOrEmpty(Mod.CleanKey(s.CustomBaseUrl)));
+                !string.IsNullOrEmpty(Keys.Clean(s.CloudflareAccountId)),
+                !freeform || !string.IsNullOrEmpty(Keys.Clean(s.CustomBaseUrl)));
         }
     }
 
@@ -4731,13 +4764,13 @@ namespace Cs2AutoTranslator
     {
         public MicrosoftEngine() : base(TranslatorSetting.Engine.Microsoft) { }
 
-        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Mod.CleanKey(s?.MicrosoftKey));
+        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.MicrosoftKey));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string key = Mod.CleanKey(s?.MicrosoftKey);
+            string key = Keys.Clean(s?.MicrosoftKey);
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
-            string region = Mod.CleanKey(s?.MicrosoftRegion);
+            string region = Keys.Clean(s?.MicrosoftRegion);
             try
             {
                 // 不带 from → 微软自动检测源语言（满足「所有非目标语言→目标语言」）。
@@ -4759,11 +4792,11 @@ namespace Cs2AutoTranslator
     {
         public DeepLEngine() : base(TranslatorSetting.Engine.DeepL) { }
 
-        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Mod.CleanKey(s?.DeepLKey));
+        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.DeepLKey));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string key = Mod.CleanKey(s?.DeepLKey);
+            string key = Keys.Clean(s?.DeepLKey);
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
             try
             {
@@ -4788,12 +4821,12 @@ namespace Cs2AutoTranslator
         public BaiduEngine() : base(TranslatorSetting.Engine.Baidu) { }
 
         public override bool IsConfigured(TranslatorSetting s)
-            => !string.IsNullOrEmpty(Mod.CleanKey(s?.BaiduAppId)) && !string.IsNullOrEmpty(Mod.CleanKey(s?.BaiduKey));
+            => !string.IsNullOrEmpty(Keys.Clean(s?.BaiduAppId)) && !string.IsNullOrEmpty(Keys.Clean(s?.BaiduKey));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string appid = Mod.CleanKey(s?.BaiduAppId);
-            string key = Mod.CleanKey(s?.BaiduKey);
+            string appid = Keys.Clean(s?.BaiduAppId);
+            string key = Keys.Clean(s?.BaiduKey);
             if (string.IsNullOrEmpty(appid) || string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
             try
             {
@@ -4831,18 +4864,10 @@ namespace Cs2AutoTranslator
     // 为什么要两条、实测数据是什么，全写在 FreeApi 那段注释里（含「不是玩家节点挂了」的取证过程），此处不重复。
     internal sealed class GoogleEngine : EngineBase
     {
-        // 上次成功的 client 与域名下标。粘住它们，免得每条文本都从头白试一遍（每个组合 8 秒超时）。
-        private static int _clientIndex;
-        private static int _hostIndex;
-
-        // 通道①连续失败到这个次数就先别再走它 —— 每条文本都白等一轮超时太浪费。
-        // 但不永久放弃：之后每 WebProbeEvery 条再探一次。玩家换个节点、或谷歌哪天把这个出口 IP 放出来，
-        // 模组自己会走回第一顺位，不需要重开游戏。
-        private const int WebGiveUpAfter = 3;
-        private const int WebProbeEvery = 50;
-        private static int _webFails;
-        private static int _webSkipped;
-        private static int _lastWebStatus;      // 只给日志看：0 = 这次压根没拿到响应（超时/DNS/连接被重置）
+        // v1.1.7：这套降级状态机（连败几次放弃通道①、攒够几条再探一次、粘住上一次成功的 client×域名）
+        // 搬进了 EngineKit.cs 的 GoogleChannels —— 留在这里离线壳一条都测不到（§10-29），而它是 5 条工作线程
+        // 共用的可变状态。这里只剩【发请求 + 写日志】，计数器一律经由那个类读写（内部是 Interlocked / Volatile）。
+        private static readonly GoogleChannels s_gchannels = new GoogleChannels();
 
         public GoogleEngine() : base(TranslatorSetting.Engine.Google) { }
 
@@ -4863,26 +4888,33 @@ namespace Cs2AutoTranslator
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (!string.IsNullOrEmpty(r))
                 {
-                    if (_webFails > 0) ModLog.Info("[Google] 网页通道恢复（此前连失败 " + _webFails + " 次），已切回第一顺位。");
-                    _webFails = 0;
-                    _webSkipped = 0;
+                    // 连败数在这里清零，所以"恢复"那一行的次数只能从清零前的返回值拿 —— 回头再读就永远是 0。
+                    int failsBefore = s_gchannels.NoteWebSuccess();
+                    if (GoogleChannels.ShouldLogWebRecovery(failsBefore))
+                        ModLog.Info("[Google] 网页通道恢复（此前连失败 " + failsBefore + " 次），已切回第一顺位。");
                     return r;
                 }
-                _webFails++;
-                _lastWebStatus = 0;      // 这次是真拿到了 200、只是解不出译文 —— 别把上一次的异常状态码留着误导排查
+                // 这次是真拿到了 200、只是解不出译文 —— 状态码记 0，别把上一次的异常状态码留着误导排查。
+                int empty = s_gchannels.NoteWebFailure(0);
                 failures.Add("web 返回空：" + Probe.Trunc(resp ?? "", 120));
+                if (GoogleChannels.ShouldLogWebFailure(empty)) LogWebDown(empty);
             }
             catch (Exception ex)
             {
-                _webFails++;
-                _lastWebStatus = Http.StatusOf(ex);
+                int n = s_gchannels.NoteWebFailure(Http.StatusOf(ex));
                 failures.Add("web → " + ex.Message);
+                // 只在「第一次失败」和「刚放弃」这两档各记一条：状态码含义排查时要用，但每条文本刷一行会把日志埋了。
+                if (GoogleChannels.ShouldLogWebFailure(n)) LogWebDown(n);
             }
-            // 只在「第一次失败」和「刚放弃」这两档各记一条：状态码含义排查时要用，但每条文本刷一行会把日志埋了。
-            if (_webFails == 1 || _webFails == WebGiveUpAfter)
-                ModLog.Error("[Google] 网页接口不通（第 " + _webFails + " 次，状态码 " + _lastWebStatus + "）。"
-                             + "429 或 302 跳到 sorry 是谷歌按【出口 IP】拦的，与节点快慢、与模组设置无关；本次改走备用接口。");
             return null;
+        }
+
+        // 「谷歌在按出口 IP 拦你」那一行。状态码取自己那次失败记下的值（s_gchannels 里最近一笔），
+        // 判据与阶梯都在 GoogleChannels，所以这一行什么时候出现由 T3 那批断言钉住。
+        private static void LogWebDown(int failCount)
+        {
+            ModLog.Error("[Google] 网页接口不通（第 " + failCount + " 次，状态码 " + s_gchannels.LastWebStatus + "）。"
+                         + "429 或 302 跳到 sorry 是谷歌按【出口 IP】拦的，与节点快慢、与模组设置无关；本次改走备用接口。");
         }
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
@@ -4893,9 +4925,7 @@ namespace Cs2AutoTranslator
             // 把真正说明问题的 429 全掩盖了 —— 排查时等于没有日志。
             var failures = new List<string>();
 
-            bool tryWeb = _webFails < WebGiveUpAfter;
-            if (!tryWeb && ++_webSkipped >= WebProbeEvery) { _webSkipped = 0; tryWeb = true; }   // 攒够条数再探一回
-            if (tryWeb)
+            if (s_gchannels.ShouldAttemptWeb())
             {
                 string web = TryWeb(text, tl, failures);
                 if (web != null) return web;
@@ -4905,8 +4935,8 @@ namespace Cs2AutoTranslator
             int hosts = FreeApi.GoogleHosts.Length, clients = FreeApi.GoogleClients.Length;
             for (int attempt = 0; attempt < hosts * clients; attempt++)
             {
-                int ci = (_clientIndex + attempt / hosts) % clients;
-                int hi = (_hostIndex + attempt) % hosts;
+                int ci, hi;
+                bool changed = s_gchannels.PickCombo(attempt, hosts, clients, out ci, out hi);
                 string client = FreeApi.GoogleClients[ci];
                 string host = FreeApi.GoogleHosts[hi];
                 string tag = client + "@" + host;
@@ -4916,9 +4946,9 @@ namespace Cs2AutoTranslator
                     string r = EngineKit.ParseResponse(Name, null, resp);
                     if (!string.IsNullOrEmpty(r))
                     {
-                        if (ci != _clientIndex || hi != _hostIndex)
+                        if (changed)
                         {
-                            _clientIndex = ci; _hostIndex = hi;
+                            s_gchannels.AdoptCombo(ci, hi);
                             ModLog.Info("[Google] 已切到可用组合：" + tag);
                         }
                         return r;
@@ -4927,7 +4957,8 @@ namespace Cs2AutoTranslator
                 }
                 catch (Exception ex) { failures.Add(tag + " → " + ex.Message); }
             }
-            ModLog.Error("[Google] 两条通道全部失败（网页接口 " + (_webFails > 0 ? "已连失败 " + _webFails + " 次" : "未走")
+            int wf = s_gchannels.WebFails;
+            ModLog.Error("[Google] 两条通道全部失败（网页接口 " + (wf > 0 ? "已连失败 " + wf + " 次" : "未走")
                          + "，备用接口 " + (hosts * clients) + " 个 client×域名组合）："
                          + Probe.Trunc(string.Join(" | ", failures.ToArray()), 900));
             return null;
@@ -5022,7 +5053,7 @@ namespace Cs2AutoTranslator
             if (string.IsNullOrEmpty(text)) return null;
             try
             {
-                string url = FreeApi.MyMemoryUrl(text, Lang.MyMemory(SourceLang(fromLocale)), Lang.MyMemory(toLocale), Mod.CleanKey(s?.MyMemoryEmail));
+                string url = FreeApi.MyMemoryUrl(text, Lang.MyMemory(SourceLang(fromLocale)), Lang.MyMemory(toLocale), Keys.Clean(s?.MyMemoryEmail));
                 string resp = Http.Get(url, BrowserUa);
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (!string.IsNullOrEmpty(r)) return r;
@@ -5055,7 +5086,7 @@ namespace Cs2AutoTranslator
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
             if (string.IsNullOrEmpty(text)) return null;
-            string key = Mod.CleanKey(s?.YandexKey);
+            string key = Keys.Clean(s?.YandexKey);
             try
             {
                 return string.IsNullOrEmpty(key) ? Web(text, toLocale) : Official(key, text, toLocale);
@@ -5113,11 +5144,11 @@ namespace Cs2AutoTranslator
     {
         public GeminiEngine() : base(TranslatorSetting.Engine.Gemini) { }
 
-        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Mod.CleanKey(s?.GeminiKey));
+        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.GeminiKey));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string key = Mod.CleanKey(s?.GeminiKey);
+            string key = Keys.Clean(s?.GeminiKey);
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
             try
             {
@@ -5145,11 +5176,11 @@ namespace Cs2AutoTranslator
     {
         public OpenAiCompatEngine(TranslatorSetting.Engine id) : base(id) { }
 
-        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Mod.CleanKey(s?.GetKeyFor(Id)));
+        public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.GetKeyFor(Id)));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string key = Mod.CleanKey(s?.GetKeyFor(Id));
+            string key = Keys.Clean(s?.GetKeyFor(Id));
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
             string model = s.EffectiveModel;
             try
@@ -5180,12 +5211,12 @@ namespace Cs2AutoTranslator
         public CloudflareEngine() : base(TranslatorSetting.Engine.Cloudflare) { }
 
         public override bool IsConfigured(TranslatorSetting s)
-            => !string.IsNullOrEmpty(Mod.CleanKey(s?.CloudflareAccountId)) && !string.IsNullOrEmpty(Mod.CleanKey(s?.CloudflareToken));
+            => !string.IsNullOrEmpty(Keys.Clean(s?.CloudflareAccountId)) && !string.IsNullOrEmpty(Keys.Clean(s?.CloudflareToken));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
-            string account = Mod.CleanKey(s?.CloudflareAccountId);
-            string token = Mod.CleanKey(s?.CloudflareToken);
+            string account = Keys.Clean(s?.CloudflareAccountId);
+            string token = Keys.Clean(s?.CloudflareToken);
             if (string.IsNullOrEmpty(account) || string.IsNullOrEmpty(token) || string.IsNullOrEmpty(text)) return null;
             string src = Lang.Cloudflare(SourceLang(fromLocale));
             string dst = Lang.Cloudflare(toLocale);
@@ -5221,7 +5252,7 @@ namespace Cs2AutoTranslator
         public CustomEngine() : base(TranslatorSetting.Engine.Custom) { }
 
         public override bool IsConfigured(TranslatorSetting s)
-            => s != null && CustomAi.IsVendor(s.CustomVendor.ToString()) && !string.IsNullOrEmpty(Mod.CleanKey(s.CustomKey));
+            => s != null && CustomAi.IsVendor(s.CustomVendor.ToString()) && !string.IsNullOrEmpty(Keys.Clean(s.CustomKey));
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
@@ -5230,9 +5261,9 @@ namespace Cs2AutoTranslator
             // 请求在飞的几百毫秒里玩家切了厂商就会凑出半新半旧的组合 —— A 家的 key 打上 B 家的端点，
             // 正是这一次要修的 bug（实测日志里出现过「用第三方 sk- 打 Google 接口拿 401」）。
             string vendor = CustomAi.Normalize(s.CustomVendor.ToString());
-            string key = Mod.CleanKey(s.GetVendorKey(vendor));
+            string key = Keys.Clean(s.GetVendorKey(vendor));
             if (string.IsNullOrEmpty(key)) return null;
-            string baseUrl = Mod.CleanKey(s.GetVendorBaseUrl(vendor));
+            string baseUrl = Keys.Clean(s.GetVendorBaseUrl(vendor));
             // 反馈8：厂商选「自定义」时，接口格式由玩家在选项里挑；其余 8 家的格式是固定的，Protocol() 会忽略
             // 玩家的选择 —— 选了 deepseek 又把格式改成 anthropic，只会得到一个必然失败的请求。
             string protocol = CustomAi.Protocol(vendor, s.CustomProtocol.ToString());

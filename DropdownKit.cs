@@ -112,6 +112,86 @@ namespace Cs2AutoTranslator
         // 判据写成一条能被离线断言钉住的函数，而不是靠调用方记得传对 enabled。
         public static bool MayEnqueue(bool fullSweep) { return !fullSweep; }
 
+        // ===== v1.2.1 需求2/3：懒翻的三把闸 =====
+        // 用户原话（v1.2.1 那一轮）：「只显示在当前界面上的文字送去翻译（上下滚动显示的也算一起）。
+        // 而鼠标移到设置项跳出的说明、其他的标签页里的文字这些都是需要鼠标移动或点击才能看见的，
+        // 看见后再送去翻译」。
+        // 判据全部照抄游戏自己的代码，不发明第二套（发明的那套 v1.2.0 已经失败过一次，见下面②的注释）：
+        //   ① 页：OptionsUISystem.cs:1011 `if (!string.IsNullOrEmpty(m_SearchQuery) || m_ActivePageBinding.value == value.id)`
+        //   ② 标签页：:901 `m_ActiveSectionBinding.Update(section?.id ?? string.Empty)`（ShouldVisitSection）
+        //   ③ 行：:902 `m_WidgetBindings.children = section.GetItems(m_IsAdvanced)`，
+        //      搜索时换成 :884 那份跨页命中清单（OnScreenSet / IsOnScreen）
+        //   ④ 行自己的 hidden() 委托：:233-245 的 `item.isVisible`（ShouldVisitWidget 照旧保留）
+        // known 的取向四条完全一致：读不到就放行 —— 宁可多扫，也绝不能"玩家打开了页也不翻"
+        //（用户 2026-10-02：不能影响功能的正常使用）。四条闸的兜底方向必须同向，
+        // 否则会出现"页放行了、行却全拦"这种谁都解释不了的怪形状。
+
+        // ②标签页那一闸。搜索时整闸打开：命中项散在各页各分区，由 ③ 那份清单逐行筛。
+        public static bool ShouldVisitSection(bool fullSweep, bool searching, bool idKnown,
+                                              string activeSection, string sectionId)
+        {
+            if (fullSweep) return true;              // 还原扫描：整棵树都要走（v1.1.5 的成果不能被这闸吃掉）
+            if (searching) return true;
+            if (!idKnown) return true;               // 读不到"当前是哪个标签页" ⇒ 按旧行为放行
+            return string.Equals(activeSection ?? "", sectionId ?? "", StringComparison.Ordinal);
+        }
+
+        // ④行自己的可见性那一闸（v1.2.0 原样保留，但它【不再是】标签页判据 —— 见下面 OnScreenSet 的注释）。
+        public static bool ShouldVisitWidget(bool fullSweep, bool visible, bool visibleKnown)
+        {
+            if (fullSweep) return true;
+            if (!visibleKnown) return true;
+            return visible;
+        }
+
+        // ③「此刻真正在屏幕上的那一串控件」—— 游戏自己算好的 OptionsUISystem.m_WidgetBindings.children：
+        //   · SelectSection(page, section) 里换成 section.GetItems(m_IsAdvanced)
+        //     （GetItems :148-166 已经把【折叠掉的分组】与【简单/高级模式对不上的项】筛掉）；
+        //   · 搜索时 FilterWidgets() 换成 :811-884 从各页命中项拼出来的那份。
+        // 为什么这是唯一可信的一格（v1.2.0 用 isVisible 的那一版为什么没做到）：
+        //   `Widget.isVisible => !m_Hidden`，而 m_Hidden 只被 hidden() 委托写（decompiled Widget.cs）——
+        //   它表达的是"模组自己要不要藏这一行"，跟"玩家现在滚到哪、点的是哪个标签页"毫无关系。
+        //   非当前标签页的控件建页时就全部存在，m_Hidden 是从没刷新过的残留值 ⇒ 那道闸按定义拦不住别的标签页。
+        //   实机凭据：玩家那一局日志「选项行文字 85 处 … 玩家看不见的行跳过 2 处」，两道 isVisible 闸合计只拦住 2 处。
+        // 上下滚动不改这份清单（滚动是 cohtml 侧的事），所以"滚到才看见的那几行"照用户口径算同一屏、一起翻。
+        //
+        // 集合按【引用】判等：控件类型哪天重写 Equals/GetHashCode 的话，值判等会把两个不同控件并进同一格，
+        // 于是"这行在不在屏上"变成看它文字像不像 —— 那是我们承担不起的错法，所以只用 ReferenceEquals。
+        // 空清单 + 没在搜索 ⇒ known=false（放行）：那是玩家刚清空搜索框的一瞬间
+        // （m_SearchQuery 变成 ""、SelectSection 仍走 FilterWidgets 那支，children 于是是空表），
+        // 这一刻按"读不到"处理退回①②④，免得眼前整页文字突然不翻。
+        public static HashSet<object> OnScreenSet(System.Collections.IList children, bool searching, out bool known)
+        {
+            known = false;
+            if (children == null) return null;
+            if (children.Count == 0 && !searching) return null;
+            var set = new HashSet<object>(children.Count, ReferenceComparer.Instance);
+            foreach (object w in children) if (w != null) set.Add(w);
+            known = true;
+            return set;
+        }
+
+        // 这一行此刻在不在屏上。清单读不到 ⇒ 放行（兜底方向与上面三条一致）。
+        public static bool IsOnScreen(bool listKnown, HashSet<object> onScreen, object widget)
+        {
+            if (!listKnown || onScreen == null) return true;
+            return widget != null && onScreen.Contains(widget);
+        }
+
+        // 只按引用判等的比较器（net48 没有 System.Collections.Generic.ReferenceEqualityComparer）。
+        private sealed class ReferenceComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceComparer Instance = new ReferenceComparer();
+            private ReferenceComparer() { }
+
+            public new bool Equals(object a, object b) { return ReferenceEquals(a, b); }
+
+            public int GetHashCode(object o)
+            {
+                return o == null ? 0 : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o);
+            }
+        }
+
         // ⚠ 与上面那条配套的一个【故意不管】：整树扫描这一轮允许把"内存里已有的译文"写上控件（Apply），
         // 只是不排新活。原因是这一轮早就先过了"不是我们写的地方一眼都不多看"那道早退
         //（`Applied == null` 直接返回），所以能被写的位置就是"我们本来就写过的那几处"——
@@ -382,6 +462,21 @@ namespace Cs2AutoTranslator
             public int SkippedPages;      // 本轮【因为不是活动页】而整页跳过的页数
             public int Deferred;          // 本轮因为超出 ScanEnqueueBudget 而留到下一轮的处数
 
+            // v1.2.0 需求2：本轮【因为玩家看不见】而整行跳过的控件数（游戏自己的 isVisible 为假）。
+            // 为什么必须单列成一格：它是"懒翻真的在懒"的唯一凭据 —— 下一局日志里这个数应当
+            // 远大于 Rows（一个模组页里大部分行是折叠分区/高级选项/说明，只有玩家眼前那几行可见）。
+            // 少了这一格，"没翻"与"懒得翻"在日志里长得一模一样（§10 第 66 条那个教训的延续）。
+            public int Invisible;
+
+            // v1.2.1 需求3：把"看得见"的判据换成游戏自己的在屏清单之后，三把闸各要有一格凭据。
+            // 下一局日志期望的形状：玩家切到某一页时「不在屏上的行跳过」吃掉同页其它标签页与折叠分组的
+            // 绝大部分，而「选项行文字」≈ 眼前那一屏的行数（几十而不是几百）。
+            // 少了这三格，"没翻"与"懒得翻"在日志里又会长得一模一样（§10 第 66 条）。
+            public int SkippedSections; // 因为"不是玩家点着的那个标签页"而整个分区跳过
+            public int OffScreen;       // 因为"不在游戏这次算好的在屏清单里"而跳过的行
+            public int DescHeld;        // 说明这一半因为"同行的标题还没落地"而延后到下一轮
+            public int OnScreen = -1;   // 本轮在屏清单里有几个控件；-1 = 读不到（退回旧行为）
+
             // 活动页那一格（v1.1.4）：由调用方把游戏自己记的 m_ActivePageBinding.value 传进来。
             // 只进日志，不参与判定 —— 但它是"这一轮为什么只扫了这一页"的唯一答案，
             // 下一局核对实机时第一眼就要能在日志里看到它。
@@ -543,6 +638,16 @@ namespace Cs2AutoTranslator
                 // v1.1.4：整页跳过数只在【真跳了】的时候进这一行（常态是"页 56 → 跳 55"，
                 // 那一格就是"没打开的页一条都没送"的直接凭据；为 0 时说明是搜索那一类例外，不必刷）。
                 if (SkippedPages > 0) sb.Append("｜整页跳过 ").Append(SkippedPages).Append(" 页");
+                // v1.2.0 需求2：看不见的行一处都没送。与「整页跳过」是同一性质的两格
+                //（一个按页、一个按行），合起来才是"懒翻"的完整凭据：玩家在日志里应当看到
+                //「看不见的行 >> 看得见的行」，否则就是这一道闸没生效。
+                if (Invisible > 0) sb.Append("｜玩家看不见的行跳过 ").Append(Invisible).Append(" 处");
+                // v1.2.1 需求3：另外两把闸（标签页 / 在屏清单）同样只在真跳了的时候进这一行。
+                // 这两格才是玩家那句「每个模组选项界面的所有文字都给我送去翻译」的直接答案：
+                // 上一版的 Invisible 只拦住 2 处，就是因为 isVisible 那把闸按定义管不到标签页。
+                if (SkippedSections > 0) sb.Append("｜非当前标签页跳过 ").Append(SkippedSections).Append(" 个分区");
+                if (OffScreen > 0) sb.Append("｜不在屏上的行跳过 ").Append(OffScreen).Append(" 处");
+                if (DescHeld > 0) sb.Append("｜说明等标题落地延后 ").Append(DescHeld).Append(" 处");
                 return sb.ToString();
             }
 
@@ -555,6 +660,10 @@ namespace Cs2AutoTranslator
                 if (Budget > 0) sb.Append("；每轮最多新排 ").Append(Budget).Append(" 条");
                 sb.Append("；本轮扫到 ").Append(Pages).Append(" 页 / ").Append(Sections).Append(" 分区");
                 if (SkippedPages > 0) sb.Append("，整页跳过 ").Append(SkippedPages).Append(" 页");
+                // v1.2.1 需求3：这一格回答"游戏这一次算出来的在屏清单里有几个控件"。
+                // 懒翻生效时它应当 ≈ 眼前一屏的行数（十几到几十），而不是整个页的几百行；
+                // (读不到) 则说明字段名随版本改了，扫描退回 v1.1.4 那一档。
+                sb.Append("；在屏控件 ").Append(OnScreen >= 0 ? OnScreen.ToString() : "(读不到)").Append(" 个");
                 sb.Append("；没取到源文本的：无key ").Append(NoId)
                   .Append("，自己的文案 ").Append(SelfKey)
                   .Append("，字典未就绪 ").Append(DictNotReady)
@@ -594,6 +703,12 @@ namespace Cs2AutoTranslator
                 RowKept += other.RowKept; RowSkipped += other.RowSkipped; RowOutOfScope += other.RowOutOfScope;
                 RowFallback += other.RowFallback; RowRestored += other.RowRestored;
                 SkippedPages += other.SkippedPages; Deferred += other.Deferred;
+                Invisible += other.Invisible;
+                SkippedSections += other.SkippedSections; OffScreen += other.OffScreen;
+                DescHeld += other.DescHeld;
+                // OnScreen 是"本轮清单里几个控件"这种瞬时读数，不是累计量：取对方那个数
+                // （-1 表示读不到）。两边一正一负时保留正的那个，别让合并把凭据抹成 -1。
+                if (other.OnScreen >= 0 && OnScreen < 0) OnScreen = other.OnScreen;
             }
         }
 

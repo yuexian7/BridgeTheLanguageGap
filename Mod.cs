@@ -18,6 +18,9 @@ using Game.UI.Localization;
 // v1.1.3：选项行的标题与说明挂在 NamedWidget 上。用别名而不是整条 using ——
 // Game.UI.Widgets 里有个 Label/Button 之类与本项目里其它名字撞车的类型，整条引进来会把编译搞脏。
 using NamedWidget = Game.UI.Widgets.NamedWidget;
+// v1.2.0 需求2：懒翻的判据是 Widget.isVisible（游戏自己刷新标题/说明时看的就是它）。
+// 单独引这一个接口名，仍然不整条 using Game.UI.Widgets（理由同上）。
+using IVisibleWidget = Game.UI.Widgets.IVisibleWidget;
 using HarmonyLib;
 using cohtml.Net;
 using TranslationData = cohtml.Net.ILocalizationManager.TranslationData;
@@ -51,7 +54,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.1.7：自定义AI厂商的思考强度改成可选项，不开就不传参数、开启后才选档位；引擎被服务端直接回绝时改为熔断并给出明确原因，不再一屏错) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.1：选项页只送游戏自己算好的「在屏控件清单」里的行——其它标签页、折叠分组、高级模式没启用的一项都不送；AI 提示词一律英文、批量正文去重；送翻前的本地预筛不再重复写进提示词) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -146,6 +149,7 @@ namespace Cs2AutoTranslator
                     TranslatorSetting.OnClearCacheClicked += ClearCacheNow;
                     TranslatorSetting.OnOpenLogFolderClicked += OpenLogFolderNow;
                     TranslatorSetting.OnOpenRegisterPageClicked += OpenRegisterPageNow;   // 需求2：跳转该引擎的注册页
+                    TranslatorSetting.OnOpenApiKeyPageClicked += OpenApiKeyPageNow;       // v1.2.0 需求3：跳转该厂商的 API key 页
                     TranslatorSetting.OnFetchModelsClicked += FetchModelsNow;             // 需求2：拉取可选模型列表
                     Patches.Apply();
                     // 注册「补丁守护」updater：每帧节流检查，被别的全局 UnpatchAll 拆掉就自动重打 + 重刷界面 + 周期存盘。
@@ -174,6 +178,11 @@ namespace Cs2AutoTranslator
                 WaitForCooldown(TransMap.HasFrontWork);
                 string src = TransMap.Take(500);
                 if (src == null) { RefreshUi(true); continue; } // 队列空闲：把还没刷出去的译文一次性刷到界面。
+
+                // v1.2.0 需求5：这条文字的【翻译范围】跟着它一路走到请求里。入队时记下的快照
+                // （TransMap.ScopeOf），Loop 在这里交给引擎 —— AI 引擎用它选提示词语境，
+                // 机翻引擎不看它（它们的请求体里没有"语境"这一说）。
+                Scope.Category scope = TransMap.ScopeOf(src);
 
                 // v1.1.5：出发时抄一张"清代代际戳"（判据 EngineKit.ResultStillWanted）。
                 // 这一条请求要在网上跑 0.1~8 秒，而玩家随时可能在这几秒里点下「清除缓存」——
@@ -232,7 +241,15 @@ namespace Cs2AutoTranslator
                     // 需求5：送引擎前把 {占位符} 掩成哨兵，尽量让引擎别翻花括号内部；回来后还原。
                     string[] guardTokens;
                     string masked = TransGuard.Mask(src, out guardTokens);
-                    string raw = engine.Translate(setting, masked, "auto", target);
+                    // v1.2.0 需求5：范围跟着这条请求走（AI 引擎据此选六套提示词语境之一；机翻引擎不读它）。
+                    // v1.2.1 需求1④：这一条是【单条】请求，形状也要钉进去（batch=false），
+                    // 否则同一条 worker 线程刚跑完批量、线程那一格还留着真，提示词就带上编号协议了。
+                    // ⚠ Clear 放 finally：Translate 内部自己吞异常返回 null，但 PostLlm 之外的
+                    //   NullReference 这类意外一旦抛出，粘住的那一格会污染后面【每一条】请求。
+                    PromptScope.Set(scope, false);
+                    string raw;
+                    try { raw = engine.Translate(setting, masked, "auto", target); }
+                    finally { PromptScope.Clear(); }
                     // 反馈1/2：紧跟着把这次的 HTTP 状态取走（线程私有，取完即清）。失败还是成功都要取，
                     // 否则上一轮的 429 会挂在线程上，被下一轮无关的失败当成原因。
                     // v1.1.2：同一次还要取走"是不是连接层就没通"，两个值是同一次失败的两半，必须成对消费。
@@ -627,14 +644,20 @@ namespace Cs2AutoTranslator
             // 编号协议按行号对齐不会翻错，但那条文本白占一格 12 分之一的批量额度。seen 一本账管两边。
             var seen = new HashSet<string>(StringComparer.Ordinal);
             seen.Add(src);
+            // v1.2.0 需求5：一批只收【同一个范围】的文本（用户原话："不同范围的肯定不可能放在同一个请求里"）。
+            // 为什么必须在这里拦、不能只靠队列天然分开：前台队列里同时会有「模组设置项」「资产名」
+            // 「游戏本体界面文字」三类，它们的提示词语境完全不同 —— 混在一批里，一段语境要覆盖三种文本，
+            // 结果就是三种都翻得似是而非。范围不符的条目原样退回（不算失败、不烧预算），
+            // 下一条循环会按它自己的范围重新攒批。
+            Scope.Category batchScope = TransMap.ScopeOf(src);
             while (items.Count < BatchKit.MaxItems)
             {
                 string more = TransMap.TakeSameTier(src, 0);   // 非阻塞，且只捞同一条队列：绝不把路名混进面板这一批
                 if (more == null) break;
                 if (seen.Add(more))                             // 第一次抓到才处置；重复抓到的直接忽略（它已经在 items 或 deferred 里）
                 {
-                    if (BatchKit.CanBatch(more)) items.Add(more);
-                    else deferred.Add(more);                   // 不能进批的先记下，等会儿整批退回，避免同一条被反复取放
+                    if (BatchKit.CanBatch(more) && TransMap.ScopeOf(more) == batchScope) items.Add(more);
+                    else deferred.Add(more);                   // 不能进批（或不同范围）的先记下，等会儿整批退回，避免同一条被反复取放
                 }
                 if (deferred.Count >= BatchKit.MaxItems * 4) break;
             }
@@ -670,9 +693,16 @@ namespace Cs2AutoTranslator
             string raw = null;
             try
             {
-                raw = engine.Translate(setting, AiPrompt.BatchUser(masked.ToArray(), Lang.ForAiPrompt(target)), "auto", target);
+                // v1.2.0 需求5：批量提示词按这一批的【共同范围】给语境。
+                // v1.2.1 需求1④：正文只剩编号行本身，整套指令（含编号协议）都在 system 字段里 ——
+                // 所以这里要把形状也钉进去（batch=true），Body 里的 AiPrompt.System 据此补末尾那一句。
+                // 三个接口的 system 字段都在 Body 里由 cat + locale 现拼，所以调用点只钉 PromptScope。
+                PromptScope.Set(batchScope, true);
+                raw = engine.Translate(setting, AiPrompt.BatchUser(masked.ToArray()), "auto", target);
             }
             catch (Exception ex) { ModLog.Error("[批量] 请求异常，本批退回单条: " + ex.Message); }
+            finally { PromptScope.Clear(); }   // ⚠ 不能在 try 里清：上面抛异常时那一格会粘在 worker 线程上，
+                                               // 下一条【单条】请求就带着编号协议出去，模型可能回 "1. 译文"。
             // 紧跟请求取走状态码（取完即清）：下面每个提前 return 都必须经过这里，
             // 否则这一轮的 429 会挂在线程上，被下一轮无关的请求当成失败原因。
             int status = EngineBase.ConsumeStatus();
@@ -858,7 +888,12 @@ namespace Cs2AutoTranslator
                         // （上一版这里曾按【游戏语言】取句，用户实机后说想固定：一般目标语言都在英文之外，
                         //  英文句子对 14 家引擎都是最稳的一条探针。）判据与那张 44 语表都在 LanguageCatalog。
                         string probe = LanguageCatalog.ProbeFor(setting.TargetLocale);
-                        string trans = engine.Translate(setting, probe, "auto", setting.TargetLocale);
+                        // v1.2.0 需求6：测试按钮那颗探针只测【连通性】，不需要整套本地化提示词。
+                        // 旧写法走 engine.Translate ⇒ 带 300+ 字符的 system 提示，一次烧掉一百多 token；
+                        // 现在 AI 引擎改走瘦身入口（只发一句「翻译这句话，直接回复译文」），
+                        // 机翻引擎本来就没有提示词，照旧走 Translate。
+                        string trans = engine is AiProbeEngine ai ? ai.TestProbe(setting, probe, setting.TargetLocale)
+                                                                  : engine.Translate(setting, probe, "auto", setting.TargetLocale);
                         // 反馈1：状态码能说出「为什么没成功」，比一律怪网络靠谱得多 ——
                         // 实测这一颗探针就是玩家唯一的诊断入口（402 是没余额、404 是模型没免费档）。
                         int testStatus = EngineBase.ConsumeStatus();
@@ -916,6 +951,29 @@ namespace Cs2AutoTranslator
             catch (Exception ex) { ModLog.Error("[注册页] 打开失败: " + ex.Message + "（可手动访问 " + url + "）"); }
         }
 
+        // v1.2.0 需求3：「获取 API key」按钮回调（主线程）：打开当前选中那家自定义 AI 厂商的官方 key 页。
+        // 与 OpenRegisterPageNow 是同一套机械（系统默认浏览器 + UseShellExecute），差别只在网址表：
+        // 那边按【引擎】查 EngineKit.RegisterUrl，这边按【厂商】查 CustomAi.KeyPage。
+        // 两个按钮各管一半、互不重叠：直连引擎（Gemini/Groq/…）用注册页，
+        // 自定义 AI 的 8 家用 key 页；自定义 AI 那一格 RegisterUrl 恒为 null ⇒ 那边不出现，不会有两个按钮并列。
+        private static void OpenApiKeyPageNow()
+        {
+            TranslatorSetting setting = TranslatorSetting.Instance;
+            if (setting == null) return;
+            // 与按钮显隐判据同一个函数、同一张表（CustomAi.HasKeyPage / KeyPage）——
+            // 「按钮在但没网址」这种半拉子状态在这里结构上不可能出现。
+            string vendor = CustomAi.Normalize(setting.CustomVendor.ToString());
+            string url = CustomAi.KeyPage(vendor);
+            if (string.IsNullOrEmpty(url))
+            { ModLog.Warn("[API key 页] 当前厂商（" + vendor + "）没有登记官方申请页。"); return; }
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+                ModLog.Info("[API key 页] 已尝试用默认浏览器打开（" + vendor + "）：" + url);
+            }
+            catch (Exception ex) { ModLog.Error("[API key 页] 打开失败: " + ex.Message + "（可手动访问 " + url + "）"); }
+        }
+
         // 「获取模型列表」按钮回调（需求2，主线程触发、后台线程拉取）：拉到的模型名进 TranslatorSetting 的列表，
         // 下拉框刷新后就能看到。四个 AI 引擎共用（自定义 AI + Groq / OpenRouter / SiliconFlow）。
         // v1.1.6：单飞。连点不会同时起多个请求线程（否则界面上显示哪一次的结果
@@ -943,7 +1001,10 @@ namespace Cs2AutoTranslator
                 ? CustomAi.ModelsUrl(vendor, setting.CustomBaseUrl, key)
                 : (name == "Gemini" ? GeminiApi.ModelsUrl(null, key) : OpenAiChat.Url(baseUrl, "models"));
             TranslatorSetting.FetchModelsResult = "正在获取模型列表…";
-            ModLog.Info("[模型列表] 引擎=" + name + " 厂商=" + (vendor ?? "-") + " 端点=" + url);
+            // v1.2.0 需求8：这个 URL 里可能带着 key（Gemini 与自定义 AI 的 /models 都把 key 放在查询参数里），
+            // 所以进日志前必须脱敏 —— 否则玩家点一下按钮、自己的 API key 就明文写进了本模组的日志文件。
+            // 域名与路径原样保留：诊断"这个端点长什么样"要的就是它们。
+            ModLog.Info("[模型列表] 引擎=" + name + " 厂商=" + (vendor ?? "-") + " 端点=" + EngineKit.RedactUrl(url));
             new Thread(() =>
             {
                 try
@@ -2173,6 +2234,7 @@ namespace Cs2AutoTranslator
                 // 本地预筛（需求1+4）：纯数字/符号、快捷键、已是目标语言 → 跳过，不联网、不显示「…」。
                 if (Scope.ShouldSkipLocal(baseVal, TargetLocale, ActiveLocale)) { TransMap.ResolveAsSkip(baseVal); return true; }
 
+                TransMap.NoteScope(baseVal, cat);              // v1.2.0 需求5：范围跟着文字入队，Loop 取出来决定提示词语境
                 TransMap.Enqueue(baseVal);            // 首次见到：入队后台翻译（入队的是干净原文，绝不含标记）。
                 if (!_firstEnqueueLogged) { _firstEnqueueLogged = true; ModLog.Info($"[Hook] 前缀已生效，首次入队待翻译文本：'{Probe.Trunc(baseVal, 40)}'（key={Probe.Trunc(key, 40)}）。"); }
                 // 静态待翻译标记：原文末尾加一个「…」表示「正在翻译」，翻好后连同标记一起原地变成译文。
@@ -2205,6 +2267,7 @@ namespace Cs2AutoTranslator
 
                 // 需求3：登记成「图层文字」，这样译文落地时才会计入 WorldLabels 的刷新信号（菜单译文不会误触发）。
                 TransMap.MarkWorldSource(src);
+                TransMap.NoteScope(src, Scope.Category.WorldLabel);   // v1.2.0 需求5：路名/区名 → 提示词走"世界标签"语境
                 TransMap.Enqueue(src);                                  // 入队后台翻译；先返回原文，翻好后由 WorldLabels 清缓存让游戏重新取一遍
             }
             catch { /* 实验性钩子：任何异常都放行原文，绝不影响世界渲染 */ }
@@ -2299,11 +2362,16 @@ namespace Cs2AutoTranslator
         static volatile bool s_EverOptions;             // 这一局里玩家是否曾经打开过选项页（没打开过就没必要走这棵树）
         static int _lastTick;
         static int _lastLogTick;
-        static string _lastActivePage;            // 上一轮扫描时游戏记着的活动页（v1.1.4 的换页触发条件）
+        static string _lastActivePage;            // 上一轮扫描时游戏记着的那一屏（页+标签页+在屏行数，v1.2.1 编码见 PageKeyOf）
         // 这一轮是不是【整棵树还原扫描】（v1.1.5，只由 RevertAll / RevertOutOfScope 在玩家点击或保存那一下置位）。
         // 扫描只在主线程跑（Tick / Patches.EnsureApplied / 按钮回调），所以一枚普通 bool 就够，
         // 不需要 Interlocked —— 但它必须在 Scan 退出时清掉，所以下面用 try/finally 成对写。
         static bool s_Sweep;
+        // v1.2.1 需求3：这一轮的「在屏控件清单」（游戏算好的 m_WidgetBindings.children 收成集合）。
+        // 与 s_Sweep 同一套生命周期：Scan 进门赋值、finally 还原外层值（嵌套调用不能互相踩）。
+        // known=false 时集合可能是 null ⇒ IsOnScreen 一律放行，绝不出现在屏清单把整页拦死的情况。
+        static HashSet<object> s_OnScreen;
+        static bool s_OnScreenKnown;
         static bool s_FirstScanLogged;                  // 第一次看到控件：无条件打一行统计（实机验证的证据）
         static bool s_WalkWarned;                       // 控件遍历出异常只说一次，够定位就行，不刷日志
 
@@ -2403,24 +2471,49 @@ namespace Cs2AutoTranslator
         // 其余每一处的代价是一次弱表查询 + 一个 Applied 判空（连反射读属性都不做）。
         public static void RevertOutOfScope(string reason) { Sweep(reason, false); }
 
-        // ===== 「玩家现在打开的是哪一页」=====（v1.1.4 需求1）
-        // 这个值游戏自己记着，就在它私有字段里，我们只是去读：
-        //   OptionsUISystem.m_ActivePageBinding ：ValueBinding<string>，.value = 当前页 id
-        //     （decompiled OptionsUISystem.cs:584 建绑定；:900 `m_ActivePageBinding.Update(page?.id ?? string.Empty)`；
-        //      :488 `pages` 是 Dictionary<string,Page>，键就是同一个 page.id ⇒ 可以直接和 pe.Key 比）
-        //   OptionsUISystem.m_SearchQuery       ：string（:454）。搜索时 :1011 那一格让游戏把【所有命中页】
-        //     一起重算，所以那一刻我们也该全扫 —— 判据必须和游戏同一格，不能我们自己发明。
-        // 反射按 §10 第 81 条只解析一次并缓存。任何一步拿不到 ⇒ known=false ⇒ 调用方退回"整棵树都扫"：
-        // 游戏改版时宁可多扫，也绝不能变成"玩家打开了页也不翻"（用户 2026-10-02：不能影响功能的正常使用）。
+        // ===== 「玩家此刻看见的是哪一屏」=====（v1.1.4 需求1 → v1.2.1 需求3 换成真判据）
+        // 三样东西全是游戏自己记着的，我们只去读（反射按 §10 第 81 条解析一次并缓存）：
+        //   ① m_ActivePageBinding.value    当前【页】的 id
+        //      （decompiled OptionsUISystem.cs:584 建绑定；:900 `m_ActivePageBinding.Update(page?.id ?? "")`；
+        //       :488 `pages` 是 Dictionary<string,Page>，键就是同一个 page.id ⇒ 可以直接和 pe.Key 比）
+        //   ② m_ActiveSectionBinding.value 当前【标签页】的 id（:585 建绑定；:901 同一个函数里更新）
+        //   ③ m_WidgetBindings.children    此刻真正序列化进页面的那一串控件：
+        //      · 选中分区时 :902 `m_WidgetBindings.children = section.GetItems(m_IsAdvanced)`
+        //        （GetItems :148-166 已经筛掉【折叠掉的分组】和【与当前简单/高级模式对不上的项】）
+        //      · 搜索时 :884 `m_WidgetBindings.children = list`，list 由 :811-884 从各页命中项拼出来
+        //      ⇒ 这一串就是"玩家眼前这一屏"。上下滚动不改它（滚动是 cohtml 侧的事），
+        //        所以"滚动到才看见的那几行"照用户的口径算同一屏，一起翻。
+        // 为什么 v1.2.0 那一版没做到（玩家原话「还是没变啊，每个模组选项界面的所有文字都给我送去翻译了」）：
+        //   那一版只用了 ① + Widget.isVisible。而 `Widget.isVisible => !m_Hidden`，m_Hidden 只被
+        //   hidden() 委托写（decompiled Game/UI/Widgets/Widget.cs），【跟"在不在屏幕上"没有关系】；
+        //   其它标签页的控件建页时就全部存在、从没被 UpdateVisibility 碰过 ⇒ isVisible 是残留的 true。
+        //   实机凭据就是玩家那一局的日志行：「选项行文字 85 处 … 玩家看不见的行跳过 2 处」—— 只拦住 2 处。
+        // 兜底方向与 ShouldScanPage 一致：任何一步读不到 ⇒ 对应 known=false ⇒ 退回"多扫"，
+        // 绝不能出现"玩家打开了页也不翻"（用户 2026-10-02：不能影响功能的正常使用）。
         private static FieldInfo _activePageFi;
+        private static FieldInfo _activeSectionFi;
         private static FieldInfo _searchQueryFi;
+        private static FieldInfo _widgetBindingsFi;
         private static PropertyInfo _bindingValuePi;
         private static bool _gateSearched;
 
-        private static void ReadPageGate(object sys, out string activePage, out bool searching, out bool known)
+        // 一屏的读数。字段全带 known：三样东西分三档退化，不能一起当"读到了"。
+        private sealed class Gate
         {
-            activePage = null; searching = false; known = false;
-            if (sys == null) return;
+            public string Page;             // ① 当前页 id
+            public string Section;          // ② 当前标签页 id
+            public bool Searching;          // 搜索框里有词（游戏靠这一格把各页命中并排显示）
+            public bool Known;              // ① 读到了
+            public bool SectionKnown;       // ② 读到了
+            public HashSet<object> OnScreen;   // ③ 收成集合（按引用判等，见 DropdownKit.OnScreenSet）
+            public bool OnScreenKnown;      // ③ 读到了、而且此刻有资格当判据
+            public string Key;              // 换页/换标签页探测用的编码
+        }
+
+        private static Gate ReadGate(object sys)
+        {
+            var g = new Gate();
+            if (sys == null) return g;
             try
             {
                 if (!_gateSearched)
@@ -2429,42 +2522,77 @@ namespace Cs2AutoTranslator
                     const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic;
                     Type st = sys.GetType();
                     _activePageFi = st.GetField("m_ActivePageBinding", F);
+                    _activeSectionFi = st.GetField("m_ActiveSectionBinding", F);
                     _searchQueryFi = st.GetField("m_SearchQuery", F);
+                    _widgetBindingsFi = st.GetField("m_WidgetBindings", F);
                     object b = _activePageFi == null ? null : _activePageFi.GetValue(sys);
                     if (b != null) _bindingValuePi = b.GetType().GetProperty("value");
                     if (_activePageFi == null || _bindingValuePi == null)
                         ModLog.Warn("[选项页] 读不到游戏记的「当前打开的是哪一页」（字段名多半随版本改了）："
                                     + "扫描退回旧行为＝整棵树都扫。翻译功能不受影响，只是没打开的页也会送去翻译。");
+                    if (_activeSectionFi == null || _widgetBindingsFi == null)
+                        ModLog.Warn("[选项页] 读不到游戏记的「当前标签页」或「在屏控件清单」（字段名多半随版本改了）："
+                                    + "懒翻退回上一版那一档＝只按 isVisible 拦，同页其它标签页的文字会一起送翻。");
                 }
-                if (_activePageFi == null || _bindingValuePi == null) return;      // known=false ⇒ 全扫
-                object binding = _activePageFi.GetValue(sys);
-                if (binding == null) return;
-                activePage = _bindingValuePi.GetValue(binding, null) as string;
-                searching = _searchQueryFi != null && !string.IsNullOrEmpty(_searchQueryFi.GetValue(sys) as string);
-                known = true;
+                g.Searching = _searchQueryFi != null && !string.IsNullOrEmpty(_searchQueryFi.GetValue(sys) as string);
+
+                if (_activePageFi != null && _bindingValuePi != null)
+                {
+                    object pb = _activePageFi.GetValue(sys);
+                    if (pb != null)
+                    {
+                        g.Page = _bindingValuePi.GetValue(pb, null) as string;
+                        g.Known = true;
+                    }
+                }
+                if (g.Known && _activeSectionFi != null && _bindingValuePi != null)
+                {
+                    object sb = _activeSectionFi.GetValue(sys);
+                    if (sb != null)
+                    {
+                        g.Section = _bindingValuePi.GetValue(sb, null) as string;
+                        g.SectionKnown = true;
+                    }
+                }
+                object wb = _widgetBindingsFi == null ? null : _widgetBindingsFi.GetValue(sys);
+                IList children = wb == null ? null : Patches.ReadObj(wb, "children") as IList;
+                bool onScreenKnown;
+                g.OnScreen = DropdownKit.OnScreenSet(children, g.Searching, out onScreenKnown);
+                g.OnScreenKnown = onScreenKnown;
+                g.Key = PageKeyOf(g);
             }
             catch (Exception ex)
             {
-                known = false;                                                     // 读失败 ⇒ 宁多扫不漏扫
+                // 读失败 ⇒ 三把闸全放行（宁多扫不漏扫），本轮按 v1.1.4 之前的形状走。
+                g.Known = false; g.SectionKnown = false; g.OnScreenKnown = false;
+                g.Page = null; g.Section = null; g.OnScreen = null; g.Key = null;
                 ModLog.Warn("[选项页] 读活动页异常（本轮退回整棵树扫描）: " + ex.Message);
             }
+            return g;
         }
 
-        // 「现在打开的是哪一页」的可比较编码。⚠ ActivePageNow()（Tick 的换页探测）与 Scan() 必须都走这一个函数，
+        // 「现在打开的是哪一屏」的可比较编码。⚠ ActivePageNow()（Tick 的换页探测）与 Scan() 必须都走这一个函数，
         // 编码不一致会让"页换没换"每轮都判定成换了 ⇒ 扫描停不下来（正是本文件反复警告过的那种空转）。
-        static string PageKeyOf(string activePage, bool searching, bool known)
+        // v1.2.1 需求3：编码里必须有【标签页 id】和【在屏控件数】—— 只编页 id 的话，
+        // 玩家在同一页里点另一个标签页时编码不变 ⇒ Tick 认为"没换页"、一轮都不扫，
+        // 那个标签页就永远不翻（这正是懒翻收窄之后新引入的那类失效，必须在这里堵掉）。
+        // 控件数负责第三档：玩家点开一个折叠分组，页和分区都没换，但屏上多了几行。
+        static string PageKeyOf(Gate g)
         {
-            if (!known) return null;                                   // 读不到 ⇒ 不参与换页判定（Scan 自己会全扫）
-            if (string.IsNullOrEmpty(activePage)) return searching ? "(搜索中)" : "(无)";
-            return searching ? activePage + "+搜索" : activePage;
+            if (!g.Known) return null;                                   // 读不到 ⇒ 不参与换页判定（Scan 自己会全扫）
+            string p = string.IsNullOrEmpty(g.Page)
+                       ? (g.Searching ? "(搜索中)" : "(无)")
+                       : g.Page;
+            if (g.SectionKnown) p += "|" + (g.Section ?? "");
+            if (g.OnScreenKnown && g.OnScreen != null) p += "#" + g.OnScreen.Count.ToString(CultureInfo.InvariantCulture);
+            return g.Searching ? p + "+搜索" : p;
         }
 
-        // 每 1.2 秒最多一次（Tick 的换页探测）：向 ECS 要一次已有的系统实例 + 读两枚缓存过的字段，不碰控件树。
+        // 每 1.2 秒最多一次（Tick 的换页探测）：向 ECS 要一次已有的系统实例 + 读几枚缓存过的字段，不碰控件树。
+        // ⚠ 这里只读 children.Count（一个属性），不枚举清单 —— 枚举是 Scan 的活。
         static string ActivePageNow()
         {
-            string a; bool s, k;
-            ReadPageGate(Patches.GetOptionsSystem(), out a, out s, out k);
-            return PageKeyOf(a, s, k);
+            return ReadGate(Patches.GetOptionsSystem()).Key;
         }
 
         // ===== 一轮扫描（返回 null = 这轮根本没扫成，调用方据此决定要不要继续要下一轮） =====
@@ -2483,6 +2611,8 @@ namespace Cs2AutoTranslator
             t.Sweep = fullSweep;
             bool ok = false;
             bool outerSweep = s_Sweep;
+            HashSet<object> outerOnScreen = s_OnScreen;
+            bool outerOnScreenKnown = s_OnScreenKnown;
             s_Sweep = fullSweep;
             try
             {
@@ -2514,23 +2644,30 @@ namespace Cs2AutoTranslator
                 // 顺手一起翻省事"。省事的是我们，代价由玩家的额度与耐心付：2026-10-02 16:00:01 那一行
                 // 是「页 56 / 分区 103 / 选项行文字 2084 处 / 新入队 46+294」，1.4 秒后撞上 429、
                 // 旧退避让 5 条 worker 一起歇 20 秒 ⇒ 玩家看到的是"开了翻译半天没动静，过一会才开始"。
-                string activePage; bool searching; bool activeKnown;
-                ReadPageGate(sys, out activePage, out searching, out activeKnown);
+                Gate gate = ReadGate(sys);
                 // 日志那一格要能直接回答"为什么这一页没翻"：读不到（游戏改版）与"游戏还没选中任何页"
                 // （面板从没开过）是两种完全不同的处置，别让它们都印成空串。
-                t.ActivePage = !activeKnown ? "(读不到→按旧行为全扫)"
-                              : searching ? (string.IsNullOrEmpty(activePage) ? "(搜索中)" : activePage + "+搜索")
-                              : string.IsNullOrEmpty(activePage) ? "(游戏还没选中任何页)" : activePage;
+                t.ActivePage = !gate.Known ? "(读不到→按旧行为全扫)"
+                              : gate.Searching ? (string.IsNullOrEmpty(gate.Page) ? "(搜索中)" : gate.Page + "+搜索")
+                              : string.IsNullOrEmpty(gate.Page) ? "(游戏还没选中任何页)" : gate.Page;
                 t.Budget = DropdownKit.ScanEnqueueBudget;
-                // 记下"这一轮看的是哪一页"，供 Tick 的换页探测比较（同一个编码函数，见 PageKeyOf）。
-                _lastActivePage = PageKeyOf(activePage, searching, activeKnown);
+                // 记下"这一轮看的是哪一屏"，供 Tick 的换页探测比较（同一个编码函数，见 PageKeyOf）。
+                _lastActivePage = gate.Key;
+                // v1.2.1 需求3：这一轮的在屏清单交给 WalkWidget 那把闸。
+                // ⚠ 还原扫描（s_Sweep）【不看】它：玩家点「清除缓存」时期望所有页都退回原文，
+                //   没在屏的分区里同样挂着我们写进去的译文（v1.1.5 的整树还原就是为这个存在的）。
+                s_OnScreen = fullSweep ? null : gate.OnScreen;
+                s_OnScreenKnown = !fullSweep && gate.OnScreenKnown;
+                // 日志那一格照实报读到的数量（还原扫描那一轮也报 —— 它说的是"游戏此刻的清单有多大"，
+                // 与"这一轮有没有用它当闸"是两件事，后者由行首的 [全树还原] 已经说清了）。
+                t.OnScreen = gate.OnScreenKnown && gate.OnScreen != null ? gate.OnScreen.Count : -1;
 
                 foreach (DictionaryEntry pe in pages)
                 {
                     object page = pe.Value;
                     if (page == null) continue;
                     string pageKey = pe.Key == null ? null : pe.Key.ToString();
-                    if (!DropdownKit.ShouldVisitPage(fullSweep, pageKey, activePage, searching, activeKnown))
+                    if (!DropdownKit.ShouldVisitPage(fullSweep, pageKey, gate.Page, gate.Searching, gate.Known))
                     {
                         t.SkippedPages++;          // 整页没打开 ⇒ 一处都不看、一条都不排，也根本不进这一页的树
                         continue;
@@ -2550,6 +2687,22 @@ namespace Cs2AutoTranslator
                     int secNo = 0;
                     foreach (object section in sections)
                     {
+                        // ===== v1.2.1 需求3：懒翻第二道闸 —— 只走玩家点着的那个标签页 =====
+                        // 官方把「同一个页里的各个标签页」建成 page.sections 里的多个 section，
+                        // 判据照抄游戏自己那一句（decompiled OptionsUISystem.cs:901）：
+                        //   SelectSection(page, section) 里 `m_ActiveSectionBinding.Update(section?.id ?? "")`
+                        // —— 绑定里那个 id 就是当前标签页，别的分区里的东西此刻根本不在屏幕上。
+                        // 搜索时不能这么退：命中项散在各页各分区（:811-884），那一档由下面的在屏清单筛。
+                        // ⚠ 这里 v1.2.0 用的是 `section.isVisible`，换掉了：那一格只反映模组的 hidden()
+                        //   委托，跟"是不是当前标签页"无关（凭据：玩家那一局日志「选项行文字 85 处 /
+                        //   玩家看不见的行跳过 2 处」，两道 isVisible 闸合计只拦住 2 处）。
+                        // ⚠ 还原扫描（s_Sweep）不看这一格：整树还原要连看不见的分区一起退。
+                        if (!s_Sweep)
+                        {
+                            string secId = Patches.ReadObj(section, "id") as string;
+                            if (!DropdownKit.ShouldVisitSection(false, gate.Searching, gate.SectionKnown, gate.Section, secId))
+                            { t.SkippedSections++; continue; }
+                        }
                         IList options = section == null ? null : Patches.ReadObj(section, "options") as IList;
                         if (options == null) continue;
                         if (options.Count > 0) t.Sections++;
@@ -2558,10 +2711,13 @@ namespace Cs2AutoTranslator
                         foreach (object option in options)
                         {
                             // 读的是 Option.widget 这个自动属性（不是 SettingItemData.widget 那种懒建属性）。
-                            // ⚠ 但"没建过的页才是 null"这句在本版已被实测推翻：官方 OptionsUISystem.RegisterSetting
+                            // ⚠ "没建过的页才是 null"这句在本版已被实测推翻：官方 OptionsUISystem.RegisterSetting
                             //   在建页时就 BuildPage() → 对【每一个标签页】BuildTab() → 里面直接取 item.widget（懒建属性），
-                            //   所以模组一注册选项，全部标签页的控件就已经存在了。⇒ 其它标签页天然在这一轮扫描范围内，
-                            //   不需要等玩家点开（实机凭据：日志里那行的「页 / 分区」两个数，一个标签页 = 一个分区）。
+                            //   所以模组一注册选项，全部标签页的控件就已经存在了。
+                            // ⚠ 但这**不等于**"其它标签页天然在扫描范围内"（v1.2.0 之前这段注释就是这么写的，
+                            //   而它正是玩家那句"还是没变啊，每个模组选项界面的所有文字都给我送去翻译了"的根源）：
+                            //   控件存在 ≠ 在屏幕上。此刻在屏幕上的那一串由游戏的在屏清单给（见上面 Gate 那段），
+                            //   其它标签页要等玩家点过去、清单换了才进入扫描。
                             object widget = option == null ? null : Patches.ReadObj(option, "widget");
                             if (widget != null) WalkWidget(widget, dict, dictReady, guardSelf, enabled, target, active, t, where, pageTag, pageIsMod);
                         }
@@ -2569,7 +2725,12 @@ namespace Cs2AutoTranslator
                 }
             }
             catch (Exception ex) { ModLog.Warn("[下拉框] 扫描异常（不影响其它翻译）: " + ex.Message); }
-            finally { s_Sweep = outerSweep; }   // 上面有三条 return null 的早退路 ⇒ 复位必须放在 finally
+            finally
+            {
+                s_Sweep = outerSweep;             // 上面有三条 return null 的早退路 ⇒ 复位必须放在 finally
+                s_OnScreen = outerOnScreen;
+                s_OnScreenKnown = outerOnScreenKnown;
+            }
 
             LogScan(t, ok, reason);
             return ok ? t : null;
@@ -2581,7 +2742,11 @@ namespace Cs2AutoTranslator
         static void LogScan(DropdownKit.Tally r, bool ok, string reason)
         {
             if (!ok) return;
-            if (r.Widgets == 0 && !r.Sweep) return;           // 一个候选项容器都没看到（还没进过选项页）不值得刷屏
+            // 一个候选项容器都没看到（还没进过选项页）不值得刷屏。⚠ v1.2.1 需求3 把这一格放宽了：
+            // 懒翻生效时【眼前那一屏可能根本没有下拉框】（全是复选框/滑块那种页），
+            // 旧写法于是整轮不打 `[下拉框]` 行 —— 玩家照 §F 第 48 条找"非当前标签页跳过 N 个分区"时
+            // 一行都找不到，会把"闸在生效"误读成"闸没接上"。三把新闸只要有数可报就必须打。
+            if (r.Widgets == 0 && !r.Sweep && r.Rows == 0 && r.OffScreen == 0 && r.SkippedSections == 0) return;
 
             bool first = !s_FirstScanLogged;
             // v1.1.5：moved 这一格以前只看候选项那三个数，于是【只动选项行】的那一轮在日志里完全不留痕。
@@ -2626,6 +2791,30 @@ namespace Cs2AutoTranslator
         {
             try
             {
+                // ===== v1.2.1 需求3：懒翻第三道闸 —— 这一行此刻在不在屏幕上 =====
+                // 两道并列，判据各来自游戏的一处代码，缺一个都会漏：
+                //   ① isVisible（游戏 Section.UpdateNameAndDescription 对每个 NamedWidget 先看这一格，
+                //      decompiled OptionsUISystem.cs:233-245）—— 管模组的 hidden() 委托：
+                //      被别的设置项带着隐藏的行，游戏自己不渲染，我们也不该翻。
+                //      ⚠ 但它【管不到标签页】：`Widget.isVisible => !m_Hidden`，m_Hidden 只由 hidden() 写，
+                //      非当前标签页的那些控件建页时就全部存在、m_Hidden 是从没刷新过的残留值。
+                //   ② 在屏清单（游戏 SelectSection 里 `m_WidgetBindings.children = section.GetItems(...)`）——
+                //      管标签页、管折叠分组、管简单/高级模式：这三种"此刻不在屏幕上"游戏都已经在清单里筛掉了。
+                // 清单读不到（游戏改版）⇒ 放行，与 ShouldScanPage 的 activeKnown 同一个兜底方向。
+                if (!s_Sweep)
+                {
+                    if (widget is IVisibleWidget vis && !DropdownKit.ShouldVisitWidget(false, vis.isVisible, true))
+                    {
+                        t.Invisible++;
+                        return;
+                    }
+                    if (!DropdownKit.IsOnScreen(s_OnScreenKnown, s_OnScreen, widget))
+                    {
+                        t.OffScreen++;
+                        return;
+                    }
+                }
+
                 // ===== v1.1.3：先处理这一行的【标题与说明】=====
                 // 为什么放在 MetaOf 之前：候选项那套只认得下拉框控件（Meta 拿不到就 return），
                 // 而标题/说明挂在 NamedWidget 上 —— 复选框、滑块、按钮这些【没有候选项列表】的行
@@ -2634,7 +2823,20 @@ namespace Cs2AutoTranslator
                 {
                     string rowAt = t.WantsSamples ? where + " " + widget.GetType().Name : null;
                     HandleRowText(nw, true, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
-                    HandleRowText(nw, false, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
+                    // v1.2.1 需求3：说明这一半要【慢一拍】。玩家口径是「鼠标移到设置项跳出的说明……
+                    // 看见后再送去翻译」，而这一条在托管层【取不到凭据】：
+                    //   · 说明是随控件属性一起序列化进页面的（decompiled NamedWidget.WriteProperties 每次都
+                    //     同时写 displayName 和 description），屏幕上显不显示它是 cohtml 那边 :hover 的事；
+                    //   · OptionsUISystem 从 JS 收到的触发只有 selectPage / filteredWidgets /
+                    //     onOptionsPageClosed / confirmDisplay / revertDisplay / directoryBrowser 等，
+                    //     一个 hover 都没有（decompiled :590-680 逐条数过），Game.dll 里也没有托管侧的
+                    //     指针进入事件挂到设置行上。
+                    // 所以退一步用"这一行的标题已经落地"当判据：切到一页时，眼前那些标题先跑完，
+                    // 说明排在它们后面（同一轮预算里天然靠后），玩家真正 hover 到时看到的仍是译文。
+                    // ⚠ 还原扫描不看这一格：说明已经写上译文的那些位置必须一起退得回去。
+                    if (s_Sweep || TitleSettled(nw)) HandleRowText(nw, false, dict, dictReady, guardSelf,
+                                                                   enabled, target, active, t, rowAt, pageIsMod);
+                    else t.DescHeld++;
                 }
 
                 Meta m = MetaOf(widget.GetType());
@@ -2813,6 +3015,7 @@ namespace Cs2AutoTranslator
                     // v1.1.4 需求1：与候选项共用同一本预算（限流算的是总请求数，分两本等于预算翻倍）。
                     // 源文本已经解析好并存在 RowSlot 里，所以下一轮直接走到这一格排队，不重查字典。
                     if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return; }
+                    TransMap.NoteScope(s.Source, Scope.ClassifyItem(s.Original.id, pageIsMod));   // v1.2.0 需求5：与上面 inScope 同一判决据，只是拿来给提示词分语境
                     TransMap.Enqueue(s.Source);
                     t.RowEnqueued++;
                     return;
@@ -2825,6 +3028,22 @@ namespace Cs2AutoTranslator
                     if (!inScope) t.RowOutOfScope++; else t.RowSkipped++;
                     return;
             }
+        }
+
+        // 这一行的【标题】是否已经处理完（v1.2.1 需求3：说明要排在标题后面）。
+        // 三种"处理完"：这一行压根没有要翻的标题（Source 为 null：不翻、或本地预筛判掉、或字典查不到）、
+        // 译文已经写上控件（Applied）、或这条源文本已经有了结论（翻好了 / 判成不用翻 / 已放弃）。
+        // ⚠ 最后那一格必须用 TransMap.IsResolved 而不是"有没有译文"：永久性失败（key 失效、模型一直 400）
+        //   也要能把说明放出来，否则标题翻不成的那一页就永远卡在"等标题"这一格，玩家看到的是
+        //   "整页说明一条都不翻"—— 那是比多送几条更糟的失效。
+        static bool TitleSettled(NamedWidget w)
+        {
+            RowState st;
+            if (!s_rows.TryGetValue(w, out st)) return false;      // 连行状态都还没建（这一轮标题还没看过）
+            RowSlot n = st.Name;
+            if (n == null || n.Source == null) return true;         // 这一行没有要翻的标题
+            if (n.Applied != null) return true;                     // 译文已经在控件上
+            return TransMap.IsResolved(n.Source);                   // 有结论（含"翻不成"与"判成不用翻"）
         }
 
         // 这一行的这一半【是不是我们写过的】（v1.1.5 还原扫描用的那把便宜闸门：没写过就一眼都不多看）。
@@ -3019,6 +3238,7 @@ namespace Cs2AutoTranslator
                     // Deferred 让 Tally.Idle 为假 ⇒ Want 不被清 ⇒ 这一页一定会被排完（不会"只翻了前 24 条"）。
                     if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return changed; }
                     t.Pending++;
+                    TransMap.NoteScope(o.Source, Scope.ClassifyItem(o.Original.id, pageIsMod));   // v1.2.0 需求5：与上面 inScope 同一判决据，只是拿来给提示词分语境
                     TransMap.Enqueue(o.Source);
                     t.Enqueued++;
                     if (row != null) row.Enqueued++;
@@ -3147,6 +3367,17 @@ namespace Cs2AutoTranslator
         private static readonly BlockingCollection<string> Pending = new BlockingCollection<string>(new ConcurrentQueue<string>());
         private static readonly BlockingCollection<string> PendingWorld = new BlockingCollection<string>(new ConcurrentQueue<string>());
 
+        // v1.2.0 需求5：每条入队文字记住自己的【翻译范围】类目，Take 时原样带出来给提示词用。
+        // 为什么必须记：同一条源文本可能从多处入队（选项页一行说明、世界里的路名、资产描述），
+        // 提示词要按范围给不同语境（设置界面强调准确、资产描述强调自然），而 Loop 拿到的只有字符串。
+        // ⚠ 这张表是「入队那一刻的类目」快照，不是实时的：玩家改范围开关不会改已经排着的条目，
+        // 这不影响正确性 —— 范围闸在入队前就判过（ScopeEnabled），能进来的都曾属于勾选中的类目；
+        // 提示词只决定【怎么说】，不决定【翻不翻】。
+        // ⚠ 与 Queued 同生命周期：Queued.TryAdd 成功才写这里（重复入队不改写首次的类目，
+        // 与"同一条文字只翻一次"的缓存语义一致 —— 缓存也是按源文本共享的，见需求5 用户口径）。
+        private static readonly ConcurrentDictionary<string, Scope.Category> Scopes =
+            new ConcurrentDictionary<string, Scope.Category>();
+
         // 反馈7：「在飞」计数。Take() 已经把这条从队列里摘走了，请求却还要跑 0.1~8 秒，
         // 所以光看 Pending.Count==0 会在「最后一条还堵在网上」时误判排空，把首批刷新提前发出去。
         // 不变式：Take 取走一条 → +1；这条最终走到 SetTranslation / ResolveAsSkip / Requeue 之一 → −1。
@@ -3237,7 +3468,31 @@ namespace Cs2AutoTranslator
         {
             if (string.IsNullOrEmpty(src)) return;
             if (Translated.ContainsKey(src) || Resolved.ContainsKey(src) || GivenUp.ContainsKey(src)) return;
-            if (Queued.TryAdd(src, 0)) { try { QueueFor(src).Add(src); } catch { /* 已 CompleteAdding */ } }
+            if (Queued.TryAdd(src, 0))
+            {
+                Scopes[src] = _pendingScope;   // 入队方在调 Enqueue【之前】钉的类目；没钉就是 GameCore
+                _pendingScope = Scope.Category.GameCore;
+                try { QueueFor(src).Add(src); } catch { /* 已 CompleteAdding */ }
+            }
+        }
+
+        // 入队前由调用方钉下「这条属于哪个翻译范围」（v1.2.0 需求5）。字段而不是参数：
+        // Enqueue 有四个调用点、其中两个在闭包里，逐个传参要把 Scope 类目拖进每一层签名；
+        // 而 Enqueue 自己会把这一格读掉并复位 ⇒ 两条 worker 线程交替入队也不会串味
+        // （钉值与消费之间没有任何 await / 让出，同线程内紧接着执行）。
+        // ⚠ 必须【紧贴】 Enqueue 调用之前赋值，中间不要插可能入队的调用。
+        [ThreadStatic] private static Scope.Category _pendingScope;
+
+        public static void NoteScope(string src, Scope.Category cat)
+        {
+            if (!string.IsNullOrEmpty(src)) _pendingScope = cat;
+        }
+
+        // 这条文字入队时属于哪个范围。查不到（老盘/预热入队的条目）按 GameCore。
+        public static Scope.Category ScopeOf(string src)
+        {
+            Scope.Category c;
+            return (!string.IsNullOrEmpty(src) && Scopes.TryGetValue(src, out c)) ? c : Scope.Category.GameCore;
         }
 
         public static string Take(int msTimeout)
@@ -3389,6 +3644,7 @@ namespace Cs2AutoTranslator
             Translated.Clear();
             Resolved.Clear();
             Queued.Clear();
+            Scopes.Clear();             // v1.2.0 需求5：范围伴随表与 Queued 同生命周期，一起清（与 Attempts/GivenUp 同理）
             WorldSources.Clear();
             Attempts.Clear();
             // 反馈7：判死是「本局」的决定，不能跨设置变更留着 —— 玩家换引擎/换语言/按重新翻译就是想再试一次。
@@ -4280,6 +4536,19 @@ namespace Cs2AutoTranslator
         bool Batchable { get; }
     }
 
+    // v1.2.0 需求6：AI 引擎额外提供一条「瘦身探针」入口，只给「测试翻译」按钮用。
+    // 与 Translate 的区别只有一处：提示词从整套本地化规则缩成一句「翻译这句话，直接回复译文」
+    // （EngineKit.AiPrompt.TestProbe）—— 探针要回答的是"通不通"，不是"翻得好不好"。
+    // 机翻引擎不实现这个接口：它们的请求体里本来就没有提示词，瘦无可瘦。
+    internal interface AiProbeEngine
+    {
+        string TestProbe(TranslatorSetting s, string text, string toLocale);
+    }
+
+    // v1.2.0 需求5：「这条文字属于哪个翻译范围 / 这一条请求是单条还是批量」的旁路那一格
+    // 已搬到 EngineKit.cs（PromptScope）—— v1.2.1 起 AiPrompt.System 自己要看那一格决定末尾补不补
+    // 编号协议，而 EngineKit.cs 是无游戏依赖、能被离线回归测试（T3）直接编译的那一批文件。
+
     internal static class TranslationEngines
     {
         // 引擎实例本身不缓存凭据（每次都从 TranslatorSetting 现读），所以每次 new 一个的代价可以忽略，
@@ -4692,7 +4961,9 @@ namespace Cs2AutoTranslator
         private static void LogFailure(string engine, int status, bool connFail, Exception ex, string body)
         {
             // key 里带上状态码与连接层标志：「这一家 429」和「这一家 404」是两件事，不能互相省略。
-            string key = engine + "|" + status + "|" + connFail + "|" + (ex == null ? "" : ex.Message);
+            // v1.2.0 需求8：这里用【脱敏后】的消息做节流键 —— 否则"同一个错误但 URL 里的 key 不同"
+            // （玩家手滑改了 key 又改回来）会被当成两条互不相干的失败各刷一次，节流就漏了。
+            string key = engine + "|" + status + "|" + connFail + "|" + (ex == null ? "" : EngineKit.RedactUrl(ex.Message));
             lock (s_failLogLock)
             {
                 int now = Environment.TickCount;
@@ -4707,8 +4978,11 @@ namespace Cs2AutoTranslator
                 s_failLogTick = now;
                 ModLog.Error("[" + engine + "] 请求失败"
                     + (connFail ? "（连接层就没通，当前出口＝" + Http.EgressName + "，系统代理＝" + (Http.ProxyHint() ?? "?") + "）" : "")
-                    + ": " + (ex == null ? "?" : ex.Message)
-                    + (string.IsNullOrEmpty(body) ? "" : " | 服务端：" + Probe.Trunc(body, 300))
+                    // v1.2.0 需求8：ex.Message 与 body 都脱敏后再进日志。WebException 的 Message 有时
+                    // 带着完整 URL（含查询参数里的 key），而 body 是服务端原样回的内容 ——
+                    // 宁可多脱一次，也不能让 key 有任一条路径躺进日志文件。
+                    + ": " + EngineKit.RedactUrl(ex == null ? "?" : ex.Message)
+                    + (string.IsNullOrEmpty(body) ? "" : " | 服务端：" + Probe.Trunc(EngineKit.RedactUrl(body), 300))
                     + (skipped > 0 ? "（同类失败已省略 " + skipped + " 条）" : ""));
             }
         }
@@ -5140,11 +5414,32 @@ namespace Cs2AutoTranslator
 
     // Google Gemini。模型名写别名 gemini-flash-latest 而不是版本号 ——
     // 谷歌会把别名指向当前免费档的最新 Flash，写死版本号迟早 404（需求1「用最新的免费模型」）。
-    internal sealed class GeminiEngine : EngineBase
+    internal sealed class GeminiEngine : EngineBase, AiProbeEngine
     {
         public GeminiEngine() : base(TranslatorSetting.Engine.Gemini) { }
 
         public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.GeminiKey));
+
+        // v1.2.0 需求6：测试按钮的瘦身探针。与 Translate 的差别只在 system 一句话，
+        // 思考字段照旧按当前档位发（否则"思考关着的时候通不通"这一格测不到）。
+        public string TestProbe(TranslatorSetting s, string text, string toLocale)
+        {
+            string key = Keys.Clean(s?.GeminiKey);
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
+            try
+            {
+                string model = GeminiApi.DefaultModel;
+                int extra;
+                string thinking = CustomAi.ThinkingField(Name, null, null, model,
+                    s.GetThinking(Name, null).ToString(), out extra);
+                string resp = PostLlm(GeminiApi.TranslateUrl(null, model, key),
+                    (frag, room) => GeminiApi.ProbeBody(text, toLocale, frag, room), thinking, extra, null);
+                string r = EngineKit.ParseResponse(Name, null, resp);
+                if (string.IsNullOrEmpty(r)) ModLog.Error("[Gemini] 测试探针无译文：" + Probe.Trunc(resp ?? "", 200));
+                return r;
+            }
+            catch (Exception ex) { return Fail(ex); }
+        }
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
@@ -5155,12 +5450,13 @@ namespace Cs2AutoTranslator
                 // Gemini 的鉴权走 URL 查询参数 ?key=，模型名也在 URL 里，不在 body 里。
                 // 这一档引擎没有模型下拉框（ShowField 的 model 不含 Gemini），发出去的一律是这个别名。
                 string model = GeminiApi.DefaultModel;
-                string langName = Lang.ForAiPrompt(toLocale);
+                // v1.2.0 需求5：提示词语境跟着这条文字的范围走（Loop 在 PromptScope 里钉好了）。
+                Scope.Category cat = PromptScope.Get();
                 int extra;
                 string thinking = CustomAi.ThinkingField(Name, null, null, model,
                     s.GetThinking(Name, null).ToString(), out extra);
                 string resp = PostLlm(GeminiApi.TranslateUrl(null, model, key),
-                    (frag, room) => GeminiApi.Body(text, langName, frag, room), thinking, extra, null);
+                    (frag, room) => GeminiApi.Body(cat, text, toLocale, frag, room), thinking, extra, null);
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (string.IsNullOrEmpty(r)) ModLog.Error("[Gemini] 无译文：" + Probe.Trunc(resp ?? "", 200));
                 return r;
@@ -5172,11 +5468,33 @@ namespace Cs2AutoTranslator
     // Groq / OpenRouter / SiliconFlow：三家都是 OpenAI 兼容的 chat/completions，
     // 只有 base url 与默认模型不同（表在 EngineKit.HostedBase / HostedModel）——
     // 所以一个类按枚举 id 实例化三次，不抄三份代码（抄三份的代价是改一处忘两处）。
-    internal sealed class OpenAiCompatEngine : EngineBase
+    internal sealed class OpenAiCompatEngine : EngineBase, AiProbeEngine
     {
         public OpenAiCompatEngine(TranslatorSetting.Engine id) : base(id) { }
 
         public override bool IsConfigured(TranslatorSetting s) => !string.IsNullOrEmpty(Keys.Clean(s?.GetKeyFor(Id)));
+
+        // v1.2.0 需求6：测试按钮的瘦身探针（system 一句话，思考字段照旧发）。
+        public string TestProbe(TranslatorSetting s, string text, string toLocale)
+        {
+            string key = Keys.Clean(s?.GetKeyFor(Id));
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text)) return null;
+            string model = s.EffectiveModel;
+            try
+            {
+                int extra;
+                string thinking = CustomAi.ThinkingField(Name, null, null, model,
+                    s.GetThinking(Name, null).ToString(), out extra);
+                string resp = PostLlm(OpenAiChat.Url(EngineKit.HostedBase(Name), null),
+                    (frag, room) => OpenAiChat.ProbeBody(model, text, toLocale, frag), thinking, extra,
+                    wc => wc.Headers.Add("Authorization", "Bearer " + key));
+                string r = EngineKit.ParseResponse(Name, null, resp);
+                if (string.IsNullOrEmpty(r))
+                    ModLog.Error("[" + Name + "] 测试探针无译文（模型「" + model + "」可能已下架）：" + Probe.Trunc(resp ?? "", 200));
+                return r;
+            }
+            catch (Exception ex) { return Fail(ex); }
+        }
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
@@ -5185,12 +5503,13 @@ namespace Cs2AutoTranslator
             string model = s.EffectiveModel;
             try
             {
-                string langName = Lang.ForAiPrompt(toLocale);
+                // v1.2.0 需求5：提示词语境跟着这条文字的范围走（Loop 在 PromptScope 里钉好了）。
+                Scope.Category cat = PromptScope.Get();
                 int extra;
                 string thinking = CustomAi.ThinkingField(Name, null, null, model,
                     s.GetThinking(Name, null).ToString(), out extra);
                 string resp = PostLlm(OpenAiChat.Url(EngineKit.HostedBase(Name), null),
-                    (frag, room) => OpenAiChat.Body(model, text, langName, frag), thinking, extra,
+                    (frag, room) => OpenAiChat.Body(cat, model, text, toLocale, frag), thinking, extra,
                     wc => wc.Headers.Add("Authorization", "Bearer " + key));    // 反馈2/3/4：服务端要生成完才回，8/10 秒的通用档位会把整批请求全判成超时
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 // 免费模型名会被平台下架，这是这四家最常见的失败原因，所以把模型名写进日志。
@@ -5247,12 +5566,44 @@ namespace Cs2AutoTranslator
 
     // 自定义 AI 模型（需求1/2）：8 家主流大模型的接口格式已内置，玩家只填自己的 key。
     // 也是唯一累加 token 用量的引擎 —— 需求2 那行「已消耗token数」只在它下面显示。
-    internal sealed class CustomEngine : EngineBase
+    internal sealed class CustomEngine : EngineBase, AiProbeEngine
     {
         public CustomEngine() : base(TranslatorSetting.Engine.Custom) { }
 
         public override bool IsConfigured(TranslatorSetting s)
             => s != null && CustomAi.IsVendor(s.CustomVendor.ToString()) && !string.IsNullOrEmpty(Keys.Clean(s.CustomKey));
+
+        // v1.2.0 需求6：测试按钮的瘦身探针。厂商/协议/key 的取法与 Translate 逐字相同
+        // （含「先定 vendor 再取当前格」那条防半新半旧组合的判据），只有提示词换瘦的。
+        public string TestProbe(TranslatorSetting s, string text, string toLocale)
+        {
+            if (s == null || string.IsNullOrEmpty(text)) return null;
+            string vendor = CustomAi.Normalize(s.CustomVendor.ToString());
+            string key = Keys.Clean(s.GetVendorKey(vendor));
+            if (string.IsNullOrEmpty(key)) return null;
+            string baseUrl = Keys.Clean(s.GetVendorBaseUrl(vendor));
+            string protocol = CustomAi.Protocol(vendor, s.CustomProtocol.ToString());
+            string model = s.EffectiveModel;
+            int extra;
+            string thinking = CustomAi.ThinkingField(nameof(TranslatorSetting.Engine.Custom), vendor, protocol, model,
+                s.ThinkingWire(nameof(TranslatorSetting.Engine.Custom), vendor), out extra);
+            try
+            {
+                string url = CustomAi.TranslateUrl(protocol, vendor, baseUrl, model, key);
+                string resp = PostLlm(url,
+                    (frag, room) => CustomAi.ProbeBodyFor(protocol, model, text, toLocale, frag, room),
+                    thinking, extra, wc =>
+                    {
+                        wc.Headers.Add(CustomAi.AuthHeaderNameFor(protocol), CustomAi.AuthHeaderValueFor(protocol, key));
+                        if (protocol == CustomAi.ProtocolAnthropic) wc.Headers.Add("anthropic-version", AnthropicApi.Version);
+                    });
+                string r = CustomAi.ParseFor(protocol, resp);
+                if (string.IsNullOrEmpty(r))
+                    ModLog.Error("[Custom/" + vendor + "/" + protocol + "] 测试探针无译文（模型「" + model + "」）：" + Probe.Trunc(resp ?? "", 200));
+                return r;
+            }
+            catch (Exception ex) { return Fail(ex); }
+        }
 
         public override string Translate(TranslatorSetting s, string text, string fromLocale, string toLocale)
         {
@@ -5273,7 +5624,8 @@ namespace Cs2AutoTranslator
             // v1.1.7：这一行在界面上拆成「发不发」+「发哪一档」两行，所以档位可能是空串（玩家选了不发送），
             // 空串进 ThinkingField  ⇒ 一个思考字段都不写，请求体与「这一格压根不存在」逐字一致。
             string model = s.EffectiveModel;
-            string langName = Lang.ForAiPrompt(toLocale);
+            // v1.2.0 需求5：提示词语境跟着这条文字的范围走（Loop 在 PromptScope 里钉好了）。
+            Scope.Category cat = PromptScope.Get();
             int extra;
             string thinking = CustomAi.ThinkingField(nameof(TranslatorSetting.Engine.Custom), vendor, protocol, model,
                 s.ThinkingWire(nameof(TranslatorSetting.Engine.Custom), vendor), out extra);
@@ -5282,7 +5634,7 @@ namespace Cs2AutoTranslator
                 // gemini 格式的模型名与 key 都在 URL 里、anthropic 走 x-api-key + 版本头、其余一律 Bearer ——
                 // 这些差异全在 CustomAi 里按 protocol 分派，这里不再出现任何厂商名特例。
                 string url = CustomAi.TranslateUrl(protocol, vendor, baseUrl, model, key);
-                string resp = PostLlm(url, (frag, room) => CustomAi.BodyFor(protocol, model, text, langName, frag, room),
+                string resp = PostLlm(url, (frag, room) => CustomAi.BodyFor(cat, protocol, model, text, toLocale, frag, room),
                     thinking, extra, wc =>
                 {
                     wc.Headers.Add(CustomAi.AuthHeaderNameFor(protocol), CustomAi.AuthHeaderValueFor(protocol, key));
@@ -5290,8 +5642,10 @@ namespace Cs2AutoTranslator
                 });    // 反馈3：DeepSeek/kira 这类网关生成一句就要十几秒，10 秒档位必然全军覆没
                 string r = CustomAi.ParseFor(protocol, resp);
                 // 需求2：平台报了 usage 就用真值，没报就按字数本地估算（所以界面文案写了「与实际消耗量可能会有出入」）。
+                // ⚠ 估算时喂进去的提示词必须与【这一条真实发出的】逐字相同，否则玩家看到的 token 数对不上账 ——
+                // v1.2.0 起它是按范围拼的（cat 变了整段话都变），所以这里现拼一份一样的，不能拿固定串。
                 TranslatorSetting.AddTokens(vendor, Tokens.Charge(
-                    CustomAi.UsageFor(protocol, resp), AiPrompt.System(langName), AiPrompt.User(text), r));
+                    CustomAi.UsageFor(protocol, resp), AiPrompt.System(cat, toLocale), AiPrompt.User(text), r));
                 if (string.IsNullOrEmpty(r)) ModLog.Error("[Custom/" + vendor + "/" + protocol + "] 模型「" + model + "」没回译文：" + Probe.Trunc(resp ?? "", 200));
                 return r;
             }

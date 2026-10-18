@@ -37,6 +37,35 @@ namespace Cs2AutoTranslator
             return engineName == "Google" || engineName == "DuckDuckGo" || engineName == "MyMemory";
         }
 
+        // ===== v1.2.0 需求8：日志脱敏 =====
+        // 为什么必须有这一颗：Gemini 与自定义 AI 的「获取模型列表」把 key 放在 URL 查询参数里
+        // （`?key=AIza…`，官方就这个设计），而 Mod.FetchModelsNow 会把整个 URL 写进日志
+        // ⇒ 玩家一点按钮，自己的 API key 就明文躺在本模组的日志文件里，再被顺手贴给作者/发到群里。
+        // 这是本轮安全性复查抓到的真缺陷，等级：高（凭据外泄，且玩家自己不会察觉）。
+        // 判据只有一条：把 `key=` 后面的值换成星号，其余一字不动 —— 日志的用途是"这个端点长什么样"
+        // （域名、路径、有没有多段），那些信息必须留着。
+        // ⚠ 只脱【查询参数里的 key】。Authorization 头从来不进日志（Mod 侧三个调用点已逐个核对），
+        //   所以不需要动它；真要在日志里打头部信息时，先确认没有 "Bearer " 再打。
+        public static string RedactUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return url;
+            // 大小写不敏感地找 "key="（谷歌是 ?key=，个别网关写成 &KEY=）。
+            int i = url.IndexOf("key=", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return url;
+            int start = i + 4;
+            int end = start;
+            while (end < url.Length && url[end] != '&' && url[end] != '#') end++;
+            string secret = url.Substring(start, end - start);
+            if (secret.Length == 0) return url;      // 空值不动手：补星号会把"没填 key"伪装成"填了但脱敏了"
+            // 保留前 4 位（同一把 key 的两次日志能对上），其余按原长补星号 ——
+            // 长度本身就是"这串是什么"的信息，全补成固定 8 个星号会让两份日志看不出是不是同一把 key。
+            int keep = secret.Length < 8 ? 0 : 4;
+            string masked = keep > 0
+                ? secret.Substring(0, keep) + new string('*', Math.Max(1, secret.Length - keep))
+                : new string('*', secret.Length);
+            return url.Substring(0, start) + masked + url.Substring(end);
+        }
+
         // 「跳转注册页面」按钮只对【需要注册】的引擎显示；免注册的和自定义 AI 都不显示（需求2）。
         // 2026-09-27 逐条重探过一遍跳转（证据：交接工作区 state\engine-audit-2026-09-27\，本机实测那一列在
         // out/manifest.tsv）：只有 DeepL 与 Yandex 两家改了地方，其余七条仍直达取 key 的页面。
@@ -215,13 +244,18 @@ namespace Cs2AutoTranslator
         // 否则「获取模型列表」自动改用第一项时会把玩家从默认档悄悄换到另一条。
         // 2026-09-27 复核（未用作者 key，只读公开列表）：OpenRouter /api/v1/models 免 key 可得 458 条、其中 17 条 :free，
         // 按现在的 FreeModelPenalty 算队首【仍是】nvidia/nemotron-3.5-lightning:free ⇒ 不变式没破。
-        // Groq 与 SiliconFlow 这两格【没能】核实：两家的 /models 都要 key（实测 401），所以别照着
-        // "列表里查不到就是下架了"下结论 —— 只能等平台改公开列表，或玩家实机报上来。
+        // 2026-10-16 复核（需求8，同样不用 key）：Groq 官方弃用页（console.groq.com/docs/deprecations）
+        // 2026-06-17 已把 llama-3.1-8b-instant / llama-3.3-70b-versatile / llama-4-scout / qwen3-32b
+        // 一并下线，官方给的替代是 gpt-oss-20b（轻量档）与 gpt-oss-120b（旗舰档）。
+        // 旧默认值仍写在代码里的后果：新玩家装上就得到一个 404 模型，「测试」按钮直接红，
+        // 而「获取模型列表」照样能拉回一大列 ⇒ 玩家看到的是"列表有东西、默认值却用不了"的怪形状。
+        // Groq 与 SiliconFlow 这两格的 /models 都要 key（实测 401），所以其余部分仍按"平台公开信息"核对，
+        // 别照"本地拉不到"下结论 —— 玩家实机报 404 时先来改这一格。
         public static string HostedModel(string engineName)
         {
             switch (engineName)
             {
-                case "Groq": return "llama-3.1-8b-instant";
+                case "Groq": return "gpt-oss-20b";
                 case "OpenRouter": return "nvidia/nemotron-3.5-lightning:free";
                 case "SiliconFlow": return "Qwen/Qwen2.5-7B-Instruct";
                 default: return null;
@@ -805,38 +839,180 @@ namespace Cs2AutoTranslator
         }
     }
 
+    // v1.2.0 需求5：把「这条文字属于哪个翻译范围」旁路给 AI 引擎选提示词语境。
+    // 为什么走 thread-static 而不是改 ITranslationEngine.Translate 签名：
+    //   14 个实现类、3 处调用点、外加一堆离线断言都钉着四参数签名；而 10 个机翻引擎根本不需要这个信息
+    //   （它们的请求体里没有"语境"一说）。加参数 = 逼着 10 个不需要的类一起改，漏一个就是编译错误，
+    //   改完还得把它们的离线黄金样本全部重钉 —— 代价与收益完全不成比例。
+    // 契约：Mod.TranslateLoop 在调 Translate【之前】钉值，Translate 之内取用；
+    //   每个 worker 线程各有一格，三条 worker 交替入队不会串味（钉值与取用之间没有让出点）。
+    // v1.2.1 搬到本文件并多钉一格 batch：AiPrompt.System 现在要按"这条请求是单条还是批量"
+    //   决定末尾那句编号协议写不写，而 System 是三家接口（OpenAI / Gemini / Anthropic）+ 自定义 AI
+    //   共用的唯一入口，逐个加参数等于把上面那笔账再付一遍。
+    // ⚠ batch 与 cat 同一个生命周期：Set 钉、Clear 清，调用方必须成对用（见 Mod 里两处 try 前后）。
+    internal static class PromptScope
+    {
+        [ThreadStatic] private static Scope.Category _cat;
+        [ThreadStatic] private static bool _set;
+        [ThreadStatic] private static bool _batch;
+
+        public static void Set(Scope.Category cat) { Set(cat, false); }
+
+        public static void Set(Scope.Category cat, bool batch) { _cat = cat; _batch = batch; _set = true; }
+
+        public static Scope.Category Get()
+        {
+            if (!_set) { _set = true; return Scope.Category.GameCore; }   // 没钉过 = 通用语境（测试按钮那条路）
+            return _cat;
+        }
+
+        // 这一条请求是不是「多行编号」的批量请求。默认假：忘了钉的调用点拿到的是单条提示词，
+        // 最坏结果只是模型不按编号回（BatchKit.Split 随即整批作废、退回单条），不会把编号写进上屏译文。
+        public static bool IsBatch { get { return _set && _batch; } }
+
+        // 取用完复位：同一条线程下一次 Translate 若忘了 Set，不会悄悄继承上一条的范围与形状。
+        public static void Clear() { _set = false; _batch = false; _cat = Scope.Category.GameCore; }
+    }
+
     // ===== AI 翻译提示词 =====
-    // 关键约束：只要译文，不要解释、不要引号。占位符已被 TransGuard 掩成私有区哨兵，
-    // 所以提示词要求「私有区字符原样保留」，这样 Unmask 才还原得回来。
+    //
+    // v1.2.1 按玩家实机反馈重写。四条口径，逐条落在哪一段：
+    //   ① 「If the text is already in the target language, return it unchanged.」整句删除，
+    //      kKeepRules 末尾那条「原文已是目标语言」一并删。玩家实测翻日语时个别文本直接把这句英文
+    //      翻译上了屏 —— 小模型会把提示词里的句子当内容，指令越长这种事越多。而"原文已经是目标语言"
+    //      这件事本地在送翻之前就判掉了（Scope.ShouldSkipLocal 的"已是目标语言"那一条，机翻引擎更是
+    //      根本没有提示词），模型侧不需要再知道一遍。kOutput 末尾补一句「不要把本指令的任何词写进译文」，
+    //      是同一现象的正面防线。
+    //   ② 提示词一律英文（玩家口径：「不管游戏语言是啥都写成英文，反正要翻译成哪个语言按目标语言来」）。
+    //      v1.2.0 那张 12 语母语指令表（s_Instructions / Instructions()）整块删除：游戏语言只决定界面文字，
+    //      与提示词无关；目标语言仍然只出现在 Target() 那一句里（取 LanguageCatalog 的母语名，
+    //      因为 简体中文 / 繁體中文 / 日本語 这类名字本身就比英文名更不容易被模型认错）。
+    //   ③ 只写【本地判不了的】约束。逐条对过 Scope.ShouldSkipLocal 的九条本地预筛与 TransGuard 的掩码：
+    //      键位串、数字/单位/测量值、文件路径与操作路径、纯占位符、语言名、locale 码 —— 这些在入队前
+    //      就被拦下，根本到不了模型，写进提示词只是加长前缀；{花括号占位符} 已被 TransGuard 换成私有区
+    //      哨兵，模型看不到花括号，所以那边只需要「私有区字符原样保留」一条。
+    //      留在 kRules 里的只剩三样：专有名词（需求4 点名的那一项）、markup/代码（本地不掩码）、
+    //      私有区哨兵。
+    //   ④ 前缀即缓存：拼接顺序按"越通用越靠前"排 ——
+    //      kRole（所有请求逐字相同）→ Target（整局相同）→ kRules + kOutput（所有请求逐字相同）
+    //      → Brief（六种范围各一份）→ 批量协议（只有批量请求带）。
+    //      于是六个范围共用同一段长前缀，只在最后一段岔开；批量正文不再重复 system 里的整段指令
+    //      （v1.2.0 那版把 Instructions + Brief + kKeepRules 在 user 正文里又抄了一遍，
+    //      每条批量请求白烧一两百 token，还把公共前缀压到了 user 段里）。
+    //      请求体本身有没有混进时间戳/计数器这类动态字段，见文件末尾 AiPromptAudit.BodyIsStablePrefix ——
+    //      那是一条能被离线断言钉住的判据，不靠人眼复查。
     internal static class AiPrompt
     {
-        public static string System(string langName)
+        // ---- ④ 第一段：与目标语言、与范围都无关，所有请求逐字相同 ----
+        private const string kRole =
+            "You are a professional localization translator for the city-building game Cities: Skylines II. ";
+
+        // ---- 整局不变（玩家选好目标语言之后）----
+        private static string Target(string langName)
         {
-            return "You are the translation engine of a city-building game. "
-                 + "Translate the user's text into " + (string.IsNullOrEmpty(langName) ? "English" : langName) + ". "
-                 + "Output ONLY the translation itself: no quotes, no notes, no explanations, no language labels. "
-                 + "Keep every character in the Unicode Private Use Area (U+E000-U+F8FF) exactly where it is, unchanged. "
-                 + "Keep line breaks. If the text is already in the target language, return it unchanged.";
+            string lang = string.IsNullOrEmpty(langName) ? "English" : langName;
+            return "Translate the user's text into " + lang + ". ";
         }
+
+        // ---- ③ 唯一的「不翻清单」：只剩本地判不了的三条 ----
+        private const string kRules =
+            "Leave these exactly as they are: proper nouns, i.e. mod, product and brand names such as "
+            + "Anarchy, Skyve, Move It, Cities: Skylines II, Discord, Ko-fi, GitHub, TurboSquid; "
+            + "markup and code such as %s, [b]…[/b], <color> and JSON or XML tags; "
+            + "and every character in the Unicode Private Use Area U+E000-U+F8FF, which stands for a "
+            + "masked placeholder that has to come back unchanged. ";
+
+        // ---- 输出契约。最后一句是 ① 那起事故的正面防线 ----
+        private const string kOutput =
+            "Reply with the translation alone: no quotes, no notes, no explanations, no language name, "
+            + "and never any words from these instructions. "
+            + "Keep the original line breaks and the leading and trailing spaces. ";
+
+        // ---- 批量协议：只有批量请求才带（PromptScope.IsBatch）----
+        private const string kBatch =
+            "The user's message is a list of numbered lines. Translate every line on its own and reply "
+            + "with exactly one line per input line, each starting with the same number and \". \" prefix "
+            + "as that input line. ";
+
+        // ---- ④ 最后一段：六类范围各自的语境与风格（放在公共段之后，公共前缀才不会被子岔开）。
+        // 每段只写【这一类独有、且 kRules 与本地预筛都没说过】的东西 —— 重复不省钱，只加长提示词。
+        // ⚠ 新增一档 Scope.Category 时这里要跟着加一条 case；漏了不会报错，只会让那类文本拿通用语境。
+        private static string Brief(Scope.Category cat)
+        {
+            switch (cat)
+            {
+                case Scope.Category.ModName:
+                    return "The text is a mod's display name: a title rather than a sentence, so do not rephrase it. ";
+                case Scope.Category.ModOptions:
+                    return "The text is a settings label, an option value or a tooltip on a mod's settings page. "
+                         + "Be exact: the player has to match each label to the right control. "
+                         + "Render one source term as one fixed target term all the way through. ";
+                case Scope.Category.AssetName:
+                    return "The text is the name of a game asset (building, road, vehicle or service) shown in a list. "
+                         + "Keep it as short as the source and in the style of an in-game name. ";
+                case Scope.Category.AssetDesc:
+                    return "The text is an asset description, read as a short piece of in-game writing. "
+                         + "Fluent wording is welcome; inventing facts that are not in the source is not. ";
+                case Scope.Category.WorldLabel:
+                    return "The text is a label drawn in the game world (a street, district or city name) on a small tag. "
+                         + "Use only a few characters: a long label overflows the tag. ";
+                default:
+                    return "The text is a string from the game's own interface. "
+                         + "Keep the short, neutral tone of a game UI and reuse one term consistently. ";
+            }
+        }
+
+        // 系统提示：单条与批量共用这一个入口，形状由 PromptScope.IsBatch 决定（差末尾那一句编号协议）。
+        // ⚠ 入参 locale 是【目标语言的 locale 码】（zh-HANS / ja-JP / en-US…），语言名在这里现取：
+        //   取 LanguageCatalog 的母语写法（"日本語"、"简体中文"），比英文名更少被模型认错。
+        //   locale 认不出（目录外那 44 种之外的手输值）时 NativeName 回退 locale 原文，提示词照样成立。
+        // ⚠ 拼接顺序 = AI 服务商 prompt cache 的前缀顺序，越通用越靠前（见类头④）。
+        //   改顺序之前先想清楚：把 Brief 提到 kRules 前面，六个范围就只剩一句公共前缀。
+        public static string System(Scope.Category cat, string locale)
+        {
+            string core = kRole + Target(Lang.NativeName(locale)) + kRules + kOutput + Brief(cat);
+            return PromptScope.IsBatch ? core + kBatch : core;
+        }
+
+        // 旧入口保留给「没有范围信息」的调用方（测试按钮、老调用点）：等价于 GameCore。
+        // ⚠ 这个入口的入参历史上是【母语名】（Lang.ForAiPrompt 的返回值），不是 locale ——
+        //   现在所有调用点都已改成传 locale，它只为兼容旧签名存在；母语名查不到 locale 时
+        //   NativeName 原样返回，那一句"Translate the user's text into X"仍然成立。
+        public static string System(string langName) => System(Scope.Category.GameCore, langName);
 
         public static string User(string text) => text ?? "";
 
-        // 反馈7：批量请求正文。刻意做成「一条 user 消息里自带指令 + 编号块」，这样三种接口的
-        // Body/Parse 全都复用现成的单条通道，不必给每个引擎再加一套批量实现（改一处忘三处的风险直接消掉）。
-        // 编号是唯一的对齐依据，所以下面把「不许增删/合并/改序/翻译编号」反复说了三遍；
-        // 模型只要没照做，BatchKit.Split 就整批作废、退回单条，绝不猜哪句属于哪条。
-        public static string BatchUser(string[] texts, string langName)
+        // 批量版系统提示 = System 去掉线程状态的那一档，好让离线断言不用先钉 PromptScope。
+        // 运行时真正的批量请求走 System（body 只有这一个入口，三条接口都一样）。
+        public static string BatchSystem(Scope.Category cat, string locale)
+        {
+            return kRole + Target(Lang.NativeName(locale)) + kRules + kOutput + Brief(cat) + kBatch;
+        }
+
+        // ---- 批量正文（需求7 + v1.2.1④）----
+        // 只有编号行本身，一句指令都不再重复：整套规则已经在 system 字段里，末尾那句编号协议
+        // 由 System 通过 PromptScope.IsBatch 补上。v1.2.0 那版把 Instructions + Brief + kKeepRules
+        // 在 user 正文里又抄了一遍 —— 玩家口径「重复的也修正」点的就是这里：
+        // 一次五条文本多烧一百多 token，还把公共前缀挤到 user 段（前缀本该只在 system 里对齐）。
+        // 编号是唯一的对齐依据，模型只要没照做，BatchKit.Split 就整批作废、退回单条，
+        // 绝不猜哪句属于哪条（所以这里连「请回复 N 行」都不需要写：行数就在正文里）。
+        public static string BatchUser(string[] texts)
+        {
+            if (texts == null || texts.Length == 0) return "";
+            return BatchKit.Join(texts);
+        }
+
+        // ---- 需求6：测试按钮那颗探针的瘦身提示 ----
+        // 用户口径：「现在一次消耗一百多 token，控制在几十 token，如『将"你好，世界"翻译成英语，直接回复翻译结果：』」。
+        // 为什么可以瘦：这一颗探针只回答「这个 key/这个模型/这条网络路通不通」，不产出任何要上屏的译文，
+        // 所以角色设定、语境、风格、不翻清单、私有区哨兵规则【一条都不需要】—— 它们对连通性零贡献，
+        // 却占了 system 字段的大半。留下来的只有「翻成什么语言 + 只要译文不要解释」两句。
+        // ⚠ 这条路只给测试按钮用。后台翻译链【不走】它：那边的文本真的要上屏，需要完整提示词。
+        // ⚠ v1.2.1②：这里也一律英文（langName 仍是目标语言的母语名，由调用点传 NativeName）。
+        public static string TestProbe(string text, string langName)
         {
             string lang = string.IsNullOrEmpty(langName) ? "English" : langName;
-            var sb = new StringBuilder();
-            sb.Append("Translate each numbered line below into ").Append(lang).Append(". ")
-              .Append("Reply with exactly ").Append(texts.Length).Append(" lines, in the same order. ")
-              .Append("Every reply line must start with the same number and \". \" prefix as its input line, ")
-              .Append("followed only by the translation of that line. ")
-              .Append("Do not translate, add, drop, merge, split or reorder the numbered lines. ")
-              .Append("No quotes, no notes, no explanations, no blank lines.\n")
-              .Append(BatchKit.Join(texts));
-            return sb.ToString();
+            return "Translate into " + lang + ". Reply with the translation only, nothing else: " + (text ?? "");
         }
     }
 
@@ -856,6 +1032,15 @@ namespace Cs2AutoTranslator
         // 第九轮：思考强度这段 JSON 由 CustomAi.ThinkingField 按各家口径拼好，这里只负责插进 messages 之前。
         // 传空串 = 【完全不写任何思考字段】，请求体与第九轮之前逐字一致 —— 不认识这些字段的网关会直接 400。
         public static string Body(string model, string text, string langName, string thinkingFragment)
+            => Body(Scope.Category.GameCore, model, text, langName, thinkingFragment);
+
+        // v1.2.0 需求5：cat 决定提示词的语境与风格（六类范围各一套）。locale 是目标语言码。
+        // v1.2.1 需求1④：system 里现在还要看 PromptScope.IsBatch（批量请求末尾多一句编号协议），
+        //   所以【后台那条批量链】必须在请求期间把那一格钉成 batch=true —— 见 Mod.TryBatch。
+        // ⚠ 旧重载（langName 那一版）现在与新重载只差"有没有范围"：12 语母语指令表已删，
+        //   两个入参最后都只经 Lang.NativeName 取母语名（查不到就原样返回），不再有不同的回退分支。
+        //   调用点仍应统一走带 cat 的这一条，否则那条文字会悄悄拿 GameCore 语境。
+        public static string Body(Scope.Category cat, string model, string text, string locale, string thinkingFragment)
         {
             var sb = new StringBuilder();
             sb.Append("{\"model\":\"").Append(Json.Escape(model)).Append("\",");
@@ -863,8 +1048,23 @@ namespace Cs2AutoTranslator
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
             sb.Append("\"messages\":[");
-            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(AiPrompt.System(langName))).Append("\"},");
+            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(AiPrompt.System(cat, locale))).Append("\"},");
             sb.Append("{\"role\":\"user\",\"content\":\"").Append(Json.Escape(AiPrompt.User(text))).Append("\"}");
+            sb.Append("]}");
+            return sb.ToString();
+        }
+
+        // v1.2.0 需求6：测试按钮的瘦身请求体（system 一句话，其余与 Body 相同）。
+        public static string ProbeBody(string model, string text, string locale, string thinkingFragment)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{\"model\":\"").Append(Json.Escape(model)).Append("\",");
+            sb.Append("\"temperature\":0,\"stream\":false,");
+            if (!string.IsNullOrEmpty(thinkingFragment))
+                sb.Append(thinkingFragment).Append(',');
+            sb.Append("\"messages\":[");
+            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\"},");
+            sb.Append("{\"role\":\"user\",\"content\":\"").Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}");
             sb.Append("]}");
             return sb.ToString();
         }
@@ -922,13 +1122,34 @@ namespace Cs2AutoTranslator
         // 由 CustomAi.ThinkingField 按代际决定形状，空串 = 不写。thinkingExtraTokens 是同档位的思考额度：
         // 谷歌把思考 token 计进输出额度，所以 2048 要跟着抬高，否则「思考吃光额度 → 译文被截断」。
         public static string Body(string text, string langName, string thinkingFragment, int thinkingExtraTokens)
+            => Body(Scope.Category.GameCore, text, langName, thinkingFragment, thinkingExtraTokens);
+
+        // v1.2.0 需求5：cat = 翻译范围（六类各一套提示词语境），locale = 目标语言码。
+        public static string Body(Scope.Category cat, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
         {
             int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
             var sb = new StringBuilder();
             sb.Append("{\"systemInstruction\":{\"parts\":[{\"text\":\"")
-              .Append(Json.Escape(AiPrompt.System(langName))).Append("\"}]},");
+              .Append(Json.Escape(AiPrompt.System(cat, locale))).Append("\"}]},");
             sb.Append("\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"")
               .Append(Json.Escape(AiPrompt.User(text))).Append("\"}]}],");
+            sb.Append("\"generationConfig\":{\"temperature\":0,\"maxOutputTokens\":")
+              .Append((2048 + extra).ToString(CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(thinkingFragment)) sb.Append(',').Append(thinkingFragment);
+            sb.Append("}}");
+            return sb.ToString();
+        }
+
+        // v1.2.0 需求6：测试按钮的瘦身请求体。system 只有一句话（AiPrompt.TestProbe），
+        // 其余形状与 Body 逐字相同（含思考片段与输出额度）—— 探针要测的就是这条完整链路。
+        public static string ProbeBody(string text, string locale, string thinkingFragment, int thinkingExtraTokens)
+        {
+            int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
+            var sb = new StringBuilder();
+            sb.Append("{\"systemInstruction\":{\"parts\":[{\"text\":\"")
+              .Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\"}]},");
+            sb.Append("\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"")
+              .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}],");
             sb.Append("\"generationConfig\":{\"temperature\":0,\"maxOutputTokens\":")
               .Append((2048 + extra).ToString(CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(thinkingFragment)) sb.Append(',').Append(thinkingFragment);
@@ -975,6 +1196,10 @@ namespace Cs2AutoTranslator
         // 平台要求 budget_tokens【严格小于】max_tokens，且思考本身也占输出额度，所以 thinkingExtraTokens 用来抬高 max_tokens
         // （译文本身很短，2048 的输出额度从来没用满过）。两者都为 0 时请求体与改动前逐字一致。
         public static string Body(string model, string text, string langName, string thinkingFragment, int thinkingExtraTokens)
+            => Body(Scope.Category.GameCore, model, text, langName, thinkingFragment, thinkingExtraTokens);
+
+        // v1.2.0 需求5：cat = 翻译范围，locale = 目标语言码。
+        public static string Body(Scope.Category cat, string model, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
         {
             int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
             var sb = new StringBuilder();
@@ -982,9 +1207,24 @@ namespace Cs2AutoTranslator
               .Append((2048 + extra).ToString(CultureInfo.InvariantCulture)).Append(',');
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
-            sb.Append("\"system\":\"").Append(Json.Escape(AiPrompt.System(langName))).Append("\",");
+            sb.Append("\"system\":\"").Append(Json.Escape(AiPrompt.System(cat, locale))).Append("\",");
             sb.Append("\"messages\":[{\"role\":\"user\",\"content\":\"")
               .Append(Json.Escape(AiPrompt.User(text))).Append("\"}]}");
+            return sb.ToString();
+        }
+
+        // v1.2.0 需求6：测试按钮的瘦身请求体（system 一句话，其余与 Body 相同）。
+        public static string ProbeBody(string model, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
+        {
+            int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
+            var sb = new StringBuilder();
+            sb.Append("{\"model\":\"").Append(Json.Escape(model)).Append("\",\"max_tokens\":")
+              .Append((2048 + extra).ToString(CultureInfo.InvariantCulture)).Append(',');
+            if (!string.IsNullOrEmpty(thinkingFragment))
+                sb.Append(thinkingFragment).Append(',');
+            sb.Append("\"system\":\"").Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\",");
+            sb.Append("\"messages\":[{\"role\":\"user\",\"content\":\"")
+              .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}");
             return sb.ToString();
         }
 
@@ -1415,6 +1655,41 @@ namespace Cs2AutoTranslator
             }
         }
 
+        // ===== v1.2.0 需求3：8 家自定义 AI 厂商的「获取 API key」页面 =====
+        // 用户原话：「8个自定义AI厂商加『获取API key』按钮（放在『获取模型列表』左边），每家链接要查证」。
+        // 每条都逐家核实过（2026-10-16，官方控制台的 API Keys 页）：
+        //   gpt     → platform.openai.com/api-keys（OpenAI 平台，登录后左侧 API keys）
+        //   claude  → console.anthropic.com/settings/keys（Anthropic Console，Settings → API Keys）
+        //   kimi    → platform.moonshot.cn/console/api-keys（Moonshot 开放平台）
+        //   qwen    → bailian.console.aliyun.com/?tab=model#/api-key（阿里云百炼，注意是百炼不是 dashscope 老控制台）
+        //   deepseek→ platform.deepseek.com/api_keys（DeepSeek 开放平台）
+        //   gemini  → aistudio.google.com/apikey（Google AI Studio）
+        //   grok    → console.x.ai/settings/api-keys（xAI Console）
+        //   glm     → open.bigmodel.cn/usercenter/apikeys（智谱开放平台用户中心）
+        // ⚠ 为什么与 EngineKit.RegisterUrl 分成两张表：RegisterUrl 服务的是【14 个引擎】的"跳转注册页面"，
+        //   那里 Custom 引擎一律没有页（它可能是本地 Ollama、可能是自建网关，没有"注册"一说）；
+        //   而这里服务的是【自定义 AI 下面的 8 家具体厂商】—— 选了 gpt 就是 OpenAI 的 key，
+        //   去 OpenAI 控制台，与"引擎"那一格选的是什么无关。混一张表会让 Custom 引擎同时吃到两个按钮。
+        // ⚠ custom（玩家自填端点）故意不给页：它可能指向本地模型，给一个"去注册"的按钮是误导。
+        public static string KeyPage(string vendor)
+        {
+            switch (Normalize(vendor))
+            {
+                case "gpt": return "https://platform.openai.com/api-keys";
+                case "claude": return "https://console.anthropic.com/settings/keys";
+                case "kimi": return "https://platform.moonshot.cn/console/api-keys";
+                case "qwen": return "https://bailian.console.aliyun.com/?tab=model#/api-key";
+                case "deepseek": return "https://platform.deepseek.com/api_keys";
+                case "gemini": return "https://aistudio.google.com/apikey";
+                case "grok": return "https://console.x.ai/settings/api-keys";
+                case "glm": return "https://open.bigmodel.cn/usercenter/apikeys";
+                default: return null;      // Custom 与认不出的厂商：没有"官方申请页"
+            }
+        }
+
+        // 这一家有没有「获取 API key」页（按钮显隐判据）。认不出的厂商同样没有 ⇒ 按钮不出现。
+        public static bool HasKeyPage(string vendor) => KeyPage(vendor) != null;
+
         // 各家一个「大概率能用」的默认模型名，玩家可改可拉列表。custom 同样没有默认值：模型名只有玩家自己知道。
         public static string DefaultModel(string vendor)
         {
@@ -1505,7 +1780,7 @@ namespace Cs2AutoTranslator
                     case "gemini": return "None~Minimal~Low~Medium~High";
                     case "grok": return "None~Low~Medium~High~Xhigh";            // 无 minimal、无 max
                     case "glm": return SEVEN;
-                    case Custom: return "None~Low~Medium~High";                 // 玩家自填端点，只给最通用那四档
+                    case Custom: return SEVEN;                                        // v1.2.0：玩家自填端点同样给满七档 —— 上面一行已决定发不发，这一行给全集让玩家自己选
                 }
                 return string.Empty;
             }
@@ -1911,10 +2186,22 @@ namespace Cs2AutoTranslator
         // ⚠ 最后一个参数是【拼好的 JSON 片段】，不是档位词。调用方一律先 CustomAi.ThinkingField(...) 再传进来 ——
         // 档位词直接传到这里会被当成片段塞进 body，得到一个语法上合法、语义上是垃圾的请求体。
         public static string BodyFor(string protocol, string model, string text, string langName, string thinkingFragment, int thinkingExtraTokens)
+            => BodyFor(Scope.Category.GameCore, protocol, model, text, langName, thinkingFragment, thinkingExtraTokens);
+
+        // v1.2.0 需求5：cat = 翻译范围（六类各一套提示词语境），locale = 目标语言码。
+        public static string BodyFor(Scope.Category cat, string protocol, string model, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
         {
-            if (protocol == ProtocolGemini) return GeminiApi.Body(text, langName, thinkingFragment, thinkingExtraTokens);
-            if (protocol == ProtocolAnthropic) return AnthropicApi.Body(model, text, langName, thinkingFragment, thinkingExtraTokens);
-            return OpenAiChat.Body(model, text, langName, thinkingFragment);
+            if (protocol == ProtocolGemini) return GeminiApi.Body(cat, text, locale, thinkingFragment, thinkingExtraTokens);
+            if (protocol == ProtocolAnthropic) return AnthropicApi.Body(cat, model, text, locale, thinkingFragment, thinkingExtraTokens);
+            return OpenAiChat.Body(cat, model, text, locale, thinkingFragment);
+        }
+
+        // v1.2.0 需求6：测试按钮的瘦身版分发（与 BodyFor 同一套 protocol 判断，只换提示词）。
+        public static string ProbeBodyFor(string protocol, string model, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
+        {
+            if (protocol == ProtocolGemini) return GeminiApi.ProbeBody(text, locale, thinkingFragment, thinkingExtraTokens);
+            if (protocol == ProtocolAnthropic) return AnthropicApi.ProbeBody(model, text, locale, thinkingFragment, thinkingExtraTokens);
+            return OpenAiChat.ProbeBody(model, text, locale, thinkingFragment);
         }
 
         public static string ParseFor(string protocol, string resp)

@@ -170,7 +170,7 @@ namespace Cs2AutoTranslator
             Custom,
         }
 
-        // 自定义 AI 的内置接口格式。枚举名【必须】与 EngineKit.CustomAi.Vendors 里的字符串逐字对应
+        // 自定义 AI 的内置接口格式。枚举名【必须】与 CustomAi.Vendors 里的字符串逐字对应
         // （直接 ToString() 当 vendor 传下去）；改一边就得改另一边，T3 的 Q 段钉着这张表。
         // 反馈8：末尾加第 9 项 custom —— 8 家之外的任意接口（自架网关、校内代理、其它厂商），
         // 地址/模型名全部由玩家自己填，请求体形状再由下面的 CustomProtocol 指定。
@@ -184,7 +184,7 @@ namespace Cs2AutoTranslator
         // 思考强度：第九轮按各家真实支持的档位集合铺，一种档位集合一个枚举类型（集合相同的行共用一个类型）。
         // 为什么要拆成七套：下拉框能选哪几档 = 这个属性的【枚举类型】里有哪些成员，而框架在建页时就把选项抓走了，
         // 拿不到「玩家当前选的是哪家」，所以只能给每一行配一套写死的子集（与 UrlX/KeyX 那批同一性质）。
-        // ⚠ 成员名必须与 EngineKit.CustomAi.ThinkingLevels 里那一串 ~ 分隔的词逐字相同：两边靠【名字】互转
+        // ⚠ 成员名必须与 CustomAi.ThinkingLevels 里那一串 ~ 分隔的词逐字相同：两边靠【名字】互转
         // （存盘词 = lv.ToString()，读回 = CustomAi.ParseLevel），数值一律不参与。
         // ⚠ 成员从 0 连续编号，不给数值留空洞。
 
@@ -196,7 +196,7 @@ namespace Cs2AutoTranslator
         public enum AiThinkGemini { None, Minimal, Low, Medium, High }               // Gemini 2.5 与 3.x 的并集，认不出的代际由 ThinkingField 挤回
         public enum AiThinkGrok { None, Low, Medium, High, Xhigh }                   // Grok：无 minimal、无 max
         public enum AiThinkKimi { None, Low, High, Max }                             // Kimi / DeepSeek：官方都没有 medium
-        public enum AiThinkPlain { None, Low, Medium, High }                        // 「自定义」端点：对面是谁只有玩家知道，只给最通用那四档
+        public enum AiThinkPlain { None, Minimal, Low, Medium, High, Xhigh, Max }     // 「自定义」端点：v1.2.0 起给满七档，与 gpt/glm 同集合
 
         // ---- v1.1.7：「这一行到底发不发这个字段」的开关（自定义 AI 八家厂商各一格）----
         // 可选项：选「不发送」时请求体里一个思考字段都没有，平台按它自己的默认档走（多数平台的默认是会思考、
@@ -644,6 +644,24 @@ namespace Cs2AutoTranslator
 
         // 反馈8 / 反馈4：思考强度这一行已挪到共用「模型」下拉框的正下方（声明顺序 = 界面顺序），
         // 现在它对自定义 + Gemini + 三家托管 AI 都可见，字段 _thinking 还留在这里。
+
+        // v1.2.0 需求3：「获取 API key」按钮 —— 放在「获取模型列表」的【左边】
+        // （声明顺序 = 界面顺序，所以这个属性必须写在 FetchModels 之前）。
+        // 用户原话：「8个自定义AI厂商加『获取API key』按钮（放在『获取模型列表』左边），每家链接要查证」。
+        // 为什么玩家需要它：8 家里有 6 家的 key 在境外控制台（OpenAI / Anthropic / Google / xAI…），
+        // 国内玩家"去哪申请"这件事本身就是一道门槛；按钮省掉的是"先去搜索引擎找一圈"的那几分钟。
+        // 显隐判据：引擎必须是【自定义 AI】，且当前选中的那家厂商有官方申请页
+        // （CustomAi.HasKeyPage —— 表与链接核实记录都在那里）。玩家自填端点那家
+        // （custom）没有页，按钮不出现，因为给它一个"去注册"是误导。
+        public static event Action OnOpenApiKeyPageClicked;
+
+        [SettingsUIButton]
+        [SettingsUISection(kTabEngine, kGroupEngine)]
+        [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideOpenApiKeyPage))]
+        public bool OpenApiKeyPage { set { OnOpenApiKeyPageClicked?.Invoke(); } }
+
+        private bool HideOpenApiKeyPage()
+            => TranslationEngine != Engine.Custom || !CustomAi.HasKeyPage(CustomVendor.ToString());
 
         // 「获取模型列表」按钮。需求2 要求它在下拉框【左边】，但框架一行只放一个控件，
         // 所以退而求其次放在紧邻的上一行（声明顺序 = 界面顺序）。点击后由 Mod 端后台线程拉列表，

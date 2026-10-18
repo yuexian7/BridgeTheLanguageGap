@@ -455,15 +455,30 @@ namespace Cs2AutoTranslator
         }
 
         // 专有名词表：只收「模组标题」和「平台名」这两类在都市天际线2 模组界面里会【单独成行】出现的名字
-        // （按钮文字、分区标题、下拉框候选项）。刻意不收 steam / anarchy 这类"同时是普通名词"的串 ——
-        // 整串相等就跳过意味着游戏本体某条真叫 "Steam" 的文案会永远留在英文，代价比收益大。
-        // 新增名字的唯一凭据应该是日志里一条真实的 `[懒翻译] 'X' -> '错的东西'`，不是"我觉得这是品牌"。
+        // （按钮文字、分区标题、下拉框候选项）。
+        // v1.2.0 需求4：用户点名「ANARCHY 等天际线重要模组名无论什么语言都显示英文」。判据仍是【整串相等】
+        // （见 IsProtectedName），句中出现的同名不拦 —— 按词匹配会吞正常句子，那是另一种"没翻干净"。
+        // ⚠ 收名之前想清楚反向护栏：表里每一条都必须是「整串出现时只可能是这个名字」。
+        //   已逐条权衡过（收进来的都过了这一关）：
+        //     · Anarchy / Anarchy 系 —— 天际线模组圈里的专有名，游戏本体没有一条文案整串就叫它；
+        //       "Anarchy" 同时是普通名词（无政府状态），但那类用法从不会【单独成行】出现在选项界面里。
+        //     · Move It / Skyve / Traffic / Real Time / TPB —— 同为"单看像普通词"的模组名，
+        //       但界面里单独成行时一定是那个按钮/那个分区，实机凭据里 'Move It' -> '快点' 就是这一类。
+        //   **不收**的（收了代价比收益大）：steam / workshop —— 游戏本体真有 "Steam" / "Workshop" 这种整串文案
+        //   （内容管理器里那两个页签），收了会把它们永远留在英文。
         static readonly HashSet<string> s_ProtectedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "discord", "ko-fi", "kofi", "patreon", "paypal", "gumroad",
             "github", "gitlab", "youtube", "twitch",
             "turbosquid", "sketchfab", "nexus mods", "nexusmods",
-            "skyve", "move it"
+            "skyve", "move it",
+            // v1.2.0 需求4：天际线重要模组名（用户点名 ANARCHY 打头）。收名凭据是「圈内知名 + 单独成行」
+            // （内容管理器的模组标题、选项页分区标题、下拉框候选项），不是"我觉得这是品牌"。
+            "anarchy", "access anarchy", "extra landscaping tools",
+            "plop the growables", "real weather sync", "traffic lights enhancement alpha",
+            "tpb", "traffic manager president edition", "find it", "precision engineering",
+            "81 tiles", "first person camera", "loading screen mod", "real time",
+            "zone snapper", "tool mode memory", "blueprint hub", "bus line auto stops",
         };
 
         // 整串（去首尾空白）命中上表 → true。零分配：不 ToLower 整个串，交给 OrdinalIgnoreCase 的 HashSet。
@@ -474,7 +489,7 @@ namespace Cs2AutoTranslator
             while (a <= b && char.IsWhiteSpace(text[a])) a++;
             while (b >= a && char.IsWhiteSpace(text[b])) b--;
             if (b - a < 2) return false;                       // 太短的不可能是这些名字
-            if (b - a > 24) return false;                      // 表里最长那条 19 字符，再长就是句子
+            if (b - a > 33) return false;                      // 表里最长那条 33 字符（Traffic Manager President Edition），再长就是句子
             return s_ProtectedNames.Contains(text.Substring(a, b - a + 1));
         }
 

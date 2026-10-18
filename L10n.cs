@@ -225,9 +225,9 @@ namespace Cs2AutoTranslator
                 "不填信箱每天 5000 字元，選填信箱提到每天 5 萬字元。品質中等，適合當應急備用。");
 
             AddEnZh(t, "notes.yandex",
-                "Yandex has shut down its keyless web channel, so an API key is now required.",
+                "Yandex has shut down its keyless web channel, so an API key is now required. A proxy is usually needed from mainland China.",
                 "Yandex 已经关掉了免 key 的网页通道，现在必须填 API 密钥才能用；中国大陆通常还需代理。",
-                "Yandex 已經關掉了免 key 的網頁通道，現在必須填 API 金鑰才能用。");
+                "Yandex 已經關掉了免 key 的網頁通道，現在必須填 API 金鑰才能用；中國大陸通常還需代理。");
 
             AddEnZh(t, "notes.microsoft",
                 "Free F0 tier: 2 million text characters a month, the most accurate machine translation overall. After creating the Translator resource the region must match; leave it empty for a Global resource.",
@@ -235,9 +235,9 @@ namespace Cs2AutoTranslator
                 "免費 F0 層每月 200 萬字元，機器翻譯裡綜合最準。建好 Translator 資源後區域要填對，全球（Global）資源留空。");
 
             AddEnZh(t, "notes.deepl",
-                "500,000 free text characters a month and the most natural wording.",
+                "500,000 free text characters a month and the most natural wording. A proxy is usually needed from mainland China.",
                 "免费每月 50 万字符，译文最自然；中国大陆通常需 VPN。",
-                "免費每月 50 萬字元，譯文最自然。");
+                "免費每月 50 萬字元，譯文最自然；中國大陸通常需 VPN。");
 
             AddEnZh(t, "notes.baidu",
                 "A mainland-China service. Free standard tier with a rate limit; sign-up needs real-name verification, and both the APP ID and the key are required.",
@@ -250,9 +250,9 @@ namespace Cs2AutoTranslator
                 "有免費額度，是所有引擎裡最懂遊戲語境的，但比機器翻譯慢，可能觸發每分鐘限流。模型固定用 gemini-flash-latest 別名。");
 
             AddEnZh(t, "notes.groq",
-                "Has a free tier and is the fastest AI option; the free tier is rate-limited only.",
+                "Has a free tier and is the fastest AI option; the free tier is rate-limited only. Sign-up needs a Google account or an overseas phone number, and a proxy is usually needed from mainland China.",
                 "有免费额度，是 AI 引擎里最快的，免费层只有速率限制。注册需谷歌账号或海外手机号，中国大陆通常还需代理。",
-                "有免費額度，是 AI 引擎裡最快的，免費層只有速率限制。");
+                "有免費額度，是 AI 引擎裡最快的，免費層只有速率限制。註冊需谷歌帳號或海外手機號，中國大陸通常還需代理。");
 
             AddEnZh(t, "notes.openrouter",
                 "An AI model aggregator; free models have names ending in :free. After clicking \"Fetch AI model list\" every AI model your API key can use is listed, and the ones that suit translation come first among the free ones. Free models share one upstream capacity lane, so a popular one often answers 429 (too busy) — switching to another free model usually fixes it.",
@@ -790,6 +790,15 @@ namespace Cs2AutoTranslator
                 "用系统默认浏览器打开当前引擎的注册／申请 key 页面。免注册的引擎不会显示本按钮。",
                 "用系統預設瀏覽器開啟目前引擎的註冊／申請 key 頁面。免註冊的引擎不會顯示本按鈕。");
 
+            // v1.2.0 需求3：「获取 API key」按钮 —— 只在自定义 AI 的 8 家厂商下出现（自填端点那家没有官方页）。
+            // 说明里刻意【不写厂商名清单】：那 8 家会随平台改版增减，写进文案就得跟着改；
+            // 玩家看到哪个厂商就会看到哪个按钮，看不到的本来就没有页可去。
+            AddEnZh(t, "label.openApiKeyPage", "Get API key", "获取 API key", "取得 API key");
+            AddEnZh(t, "desc.openApiKeyPage",
+                "Opens this provider’s official API-key page in your system’s default browser, so you can create a key and paste it back into the box above. Shown only for providers that have such a page.",
+                "用系统默认浏览器打开当前这家厂商的官方 API key 页面，创建后把 key 粘回上面的输入框即可。只在该厂商有官方申请页时显示。",
+                "用系統預設瀏覽器開啟目前這家廠商的官方 API key 頁面，建立後把 key 貼回上面的輸入框即可。只在該廠商有官方申請頁時顯示。");
+
             // ===== 日志与声明（需求 1/6）=====
             Add(t, "label.logPath",
                 "Protokollpfad", "Log path", "Ruta del registro", "Chemin du journal", "Percorso del registro", "ログのパス",
@@ -1190,6 +1199,10 @@ namespace Cs2AutoTranslator
                 // 需求2：「跳转注册页面」按钮，紧挨测试按钮。
                 { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.OpenRegisterPage)), L("label.openRegisterPage") },
                 { m_Setting.GetOptionDescLocaleID(nameof(TranslatorSetting.OpenRegisterPage)), L("desc.openRegisterPage") },
+
+                // v1.2.0 需求3：「获取 API key」按钮，在自定义 AI 的 8 家厂商下显示（声明顺序 = 界面顺序）。
+                { m_Setting.GetOptionLabelLocaleID(nameof(TranslatorSetting.OpenApiKeyPage)), L("label.openApiKeyPage") },
+                { m_Setting.GetOptionDescLocaleID(nameof(TranslatorSetting.OpenApiKeyPage)), L("desc.openApiKeyPage") },
 
                 // 需求2：已消耗 token 数。整句话作为标题显示（bare string 的正文位置太窄）。
                 // 反馈3：改成每家一行，循环注册见下方 VendorSuffixes。

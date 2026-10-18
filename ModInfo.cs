@@ -181,10 +181,8 @@ namespace Cs2AutoTranslator
         ///     与简单-高级模式不符的项】全筛掉了；再加 m_ActiveSectionBinding 做分区循环的短路。
         ///     上下滚动不改这份清单 ⇒ 照玩家口径"滚动到也算看见"。换标签页/点开折叠分组会改变清单，
         ///     所以 PageKeyOf 的编码里补上标签页 id 与在屏控件数，Tick 才会立刻补扫那一屏。
-        ///     说明（hover 才出现的那一半）：托管层【没有】hover 凭据可取（NamedWidget.WriteProperties 每次都
-        ///     同时写 displayName 与 description，显不显示是 cohtml 的 :hover；OptionsUISystem 从 JS 收到的
-        ///     触发里一个 hover 都没有），所以退一步用"这一行的标题已经落地"当判据（TitleSettled），
-        ///     说明永远排在眼前标题后面。这是已知妥协，不是 hover 检测，代码与文档都按这个口径写。
+        ///     说明（hover 才出现的那一半）当时的结论是"托管层没有 hover 凭据、只能等标题落地"，
+        ///     那条妥协在 v1.2.2 被玩家否掉，口径见下面 1.2.2 一节，不再重复。
         ///     游戏渲染文本按玩家口径【保持原样】：进存档就整份送翻（世界标签那一路不加"看得见"闸）。
         ///   ④ 「检查每次请求的前缀有没有混入隐形时间戳或动态参数」—— 逐条查过三个 body 生成函数与
         ///     自定义 AI 的分发：整个 EngineKit.cs 没有任何 DateTime / TickCount / Random / 计数器（时间戳
@@ -193,7 +191,39 @@ namespace Cs2AutoTranslator
         ///     同入参连跑两次整个 body 必须一致、六个范围共用的前缀必须够长（tests/t3 的 prompt.audit /
         ///     prompt.prefix，六条通道各钉一行）。拼接顺序也因此定死：越通用越靠前。
         /// </summary>
-        internal const string kVersion = "1.2.1";
+        internal const string kVersion = "1.2.2";
+
+        /// <summary>
+        /// 1.2.2（2026-10-19，同会话续测，仍然只部署本地不上传平台）—— 只回应 v1.2.1 收下的那条妥协：
+        /// 「1.2.0 新增问题：1、鼠标移到设置项再显示的说明还是会和设置项一起翻译，我说过了鼠标移上去
+        ///   才显示的文本也需要在移上去后再送去翻译。神奇的是，鼠标移到按钮上显示的说明倒确实是移上去后
+        ///   才开始翻译的。」
+        /// 两句看着矛盾，其实是同一个 cohtml 机制在两条渲染路径上的差别，逐条查过前端（游戏自带
+        /// Content\Game\UI\index.js，一手凭据）与托管侧（decompiled OptionsUISystem.cs / NamedWidget.cs）：
+        ///   · 按钮标题看着"移上去才翻"：按钮标题走的是 cohtml 的取词链 —— 前端渲染 LocalizedString
+        ///     时（js 里 `useCachedLocalization` / `Localized` 组件那一支）发现它带 id，就调
+        ///     `translate(id)` 打进 cohtml director，再进 `UILocalizationManager.Translate`。
+        ///     本模组的 Harmony Prefix 就挂在那里 ⇒ hover 到某个按钮时前端才第一次为它取词，请求
+        ///     自然发生在移上去之后。所以"按钮看着是对的"不是因为按钮特殊，而是因为它有 id 在跑取词链。
+        ///   · 说明看着"还是跟着设置项一起翻"：`NamedWidget.WriteProperties` 每次都【同时】把
+        ///     displayName 和 description 序列化进 props，前端 `option-page.tsx` 的 infoColumn 直接渲染
+        ///     `props.description`。也就是说"移上去才显示"只是 CSS/焦点的事，props 早在建页时就发出去了。
+        ///     v1.2.1 的扫描器为了翻译它，只能在 props 直出前把译文写回 description，于是【必然跟着标题
+        ///     一起送】—— 玩家看到的就是这个。
+        /// 本版改法（判据收在 DropdownKit.MaySendDescription，一处定义，tests/t3 有断言）：
+        ///   ① 说明这一半继续【不跟着标题同轮送】：本轮只送标题，说明留着原文；
+        ///   ② 标题落地后（TitleSettled）下一轮才排说明 —— 这条与 v1.2.1 相同，是兜底形状，
+        ///      不再冒充 hover 检测；
+        ///   ③ 有 descriptionAction 的说明例外：那条路径前端只认 props，而且写译文必须换掉模组原来的
+        ///      action（WriteRowValue），等下去它永远是英文 ⇒ 直接排，不等；
+        ///   ④ 还原扫描（关翻译 / 换语言 / 关范围）不看这一格：已经写上译文的说明必须一起退得回去；
+        ///   ⑤ 日志把这一格从「说明等标题落地延后」改成「说明等悬停/标题落地延后」，
+        ///      两处计数分开，下一局能直接看出"是故意按住"还是"限流穷住"。
+        /// ⚠ 仍然没有做的：托管侧确实拿不到 hover 事件（OptionsUISystem 的 26 个 JS→C# 绑定里一个
+        ///    hover/focus 都没有，Game.dll 侧也没有指针进入事件挂到设置行上），所以本版【不是】hover
+        ///    检测，是"说明晚于标题、且标题本身已经是真在屏判据筛过的"。真正 hover 即翻的那条链
+        ///    （取词钩子 → Prefix）只对带 id 的文字生效，这里不重复造。
+        /// </summary>
 
         /// <summary>作者署名。按作者本人要求逐字用 "yuexian"，不是平台账号名 "yuexian7"。</summary>
         internal const string kAuthor = "yuexian";

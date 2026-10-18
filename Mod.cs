@@ -54,7 +54,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.1：选项页只送游戏自己算好的「在屏控件清单」里的行——其它标签页、折叠分组、高级模式没启用的一项都不送；AI 提示词一律英文、批量正文去重；送翻前的本地预筛不再重复写进提示词) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.2：选项页说明那一半改为「等这一行标题落地后才排」——不再和设置项标题同轮一起送；按钮标题因为走取词钩子本来就是 hover 后才送，行为不变) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -2823,19 +2823,28 @@ namespace Cs2AutoTranslator
                 {
                     string rowAt = t.WantsSamples ? where + " " + widget.GetType().Name : null;
                     HandleRowText(nw, true, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
-                    // v1.2.1 需求3：说明这一半要【慢一拍】。玩家口径是「鼠标移到设置项跳出的说明……
-                    // 看见后再送去翻译」，而这一条在托管层【取不到凭据】：
-                    //   · 说明是随控件属性一起序列化进页面的（decompiled NamedWidget.WriteProperties 每次都
-                    //     同时写 displayName 和 description），屏幕上显不显示它是 cohtml 那边 :hover 的事；
-                    //   · OptionsUISystem 从 JS 收到的触发只有 selectPage / filteredWidgets /
-                    //     onOptionsPageClosed / confirmDisplay / revertDisplay / directoryBrowser 等，
-                    //     一个 hover 都没有（decompiled :590-680 逐条数过），Game.dll 里也没有托管侧的
-                    //     指针进入事件挂到设置行上。
-                    // 所以退一步用"这一行的标题已经落地"当判据：切到一页时，眼前那些标题先跑完，
-                    // 说明排在它们后面（同一轮预算里天然靠后），玩家真正 hover 到时看到的仍是译文。
+                    // v1.2.2 需求1：说明那一半要【等鼠标移上去】才送。玩家原话：
+                    //   「鼠标移到设置项再显示的说明还是会和设置项一起翻译，我说过了鼠标移上去才显示的文本
+                    //     也需要在移上去后再送去翻译。神奇的是，鼠标移到按钮上显示的说明倒确实是移上去后
+                    //     才开始翻译的。」
+                    // 两句看着矛盾，其实是同一个 cohtml 机制在两条渲染路径上的差别（一手凭据见
+                    // DropdownKit.MaySendDescription 上方的注释）：
+                    //   · 按钮标题走取词钩子（cohtml SWIG director → UILocalizationManager.Translate，
+                    //     本模组 Prefix 挂的地方）⇒ hover 时前端才第一次为它取词 ⇒ 天然"移上去才翻"；
+                    //   · 说明文字走 props 直出：NamedWidget.WriteProperties 每次都同时写 displayName 与
+                    //     description（decompiled NamedWidget.cs:83-90），props 一发出去前端渲染树里就有了，
+                    //     "移上去才显示"只是 CSS 的事 ⇒ 只要我们在扫描里翻它，就必然跟着标题一起送。
+                    // ⇒ 托管层没有 hover 凭据（26 个绑定里一个都没有，见《docs/硬约束总表.md》第 88 条末段），
+                    //   能做的只有"先不写"：本轮只送标题，说明留原文；等这一行的标题落地后的下一轮再排说明。
+                    //   v1.2.1 的"说明等标题落地"就是这个形状，本版把判据收成 DropdownKit.MaySendDescription，
+                    //   并把"为什么按钮看着是 hover 后才翻"写进同一处注释，免得下一轮又当成 bug 去追。
                     // ⚠ 还原扫描不看这一格：说明已经写上译文的那些位置必须一起退得回去。
-                    if (s_Sweep || TitleSettled(nw)) HandleRowText(nw, false, dict, dictReady, guardSelf,
-                                                                   enabled, target, active, t, rowAt, pageIsMod);
+                    // ⚠ 有 action 的说明（模组用 descriptionAction 动态给值）不等：那条路径前端只认 props，
+                    //   而且我们要写译文就得把模组原来的 action 换掉（见 WriteRowValue），等下去它永远是英文。
+                    bool maySendDesc = s_Sweep || DropdownKit.MaySendDescription(nw.descriptionAction != null,
+                                                                                 TitleSettled(nw));
+                    if (maySendDesc)
+                        HandleRowText(nw, false, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
                     else t.DescHeld++;
                 }
 
@@ -3030,20 +3039,22 @@ namespace Cs2AutoTranslator
             }
         }
 
-        // 这一行的【标题】是否已经处理完（v1.2.1 需求3：说明要排在标题后面）。
+        // 这一行的【标题】是否已经处理完（v1.2.1 需求3：说明要排在标题后面；v1.2.2 需求1 沿用）。
         // 三种"处理完"：这一行压根没有要翻的标题（Source 为 null：不翻、或本地预筛判掉、或字典查不到）、
         // 译文已经写上控件（Applied）、或这条源文本已经有了结论（翻好了 / 判成不用翻 / 已放弃）。
         // ⚠ 最后那一格必须用 TransMap.IsResolved 而不是"有没有译文"：永久性失败（key 失效、模型一直 400）
         //   也要能把说明放出来，否则标题翻不成的那一页就永远卡在"等标题"这一格，玩家看到的是
         //   "整页说明一条都不翻"—— 那是比多送几条更糟的失效。
+        // ⚠ v1.2.2：这三个条件的【身子】搬到了 DropdownKit.TitleSettled（纯函数，tests/t3 AA3 段有逐条
+        //   断言）。这里只负责把三张表读出来的三个 bool 传过去 —— 判据只允许一处，别在这里再写一套"或"。
         static bool TitleSettled(NamedWidget w)
         {
             RowState st;
             if (!s_rows.TryGetValue(w, out st)) return false;      // 连行状态都还没建（这一轮标题还没看过）
             RowSlot n = st.Name;
-            if (n == null || n.Source == null) return true;         // 这一行没有要翻的标题
-            if (n.Applied != null) return true;                     // 译文已经在控件上
-            return TransMap.IsResolved(n.Source);                   // 有结论（含"翻不成"与"判成不用翻"）
+            if (n == null || n.Source == null)
+                return DropdownKit.TitleSettled(true, false, false);    // 这一行没有要翻的标题
+            return DropdownKit.TitleSettled(false, n.Applied != null, TransMap.IsResolved(n.Source));
         }
 
         // 这一行的这一半【是不是我们写过的】（v1.1.5 还原扫描用的那把便宜闸门：没写过就一眼都不多看）。

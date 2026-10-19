@@ -54,7 +54,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.3：选项页说明那一半改成「前端为这一行的说明 id 取过词之后才送」——也就是玩家真的把它移到眼前之后；测试按钮那一次请求现在也计进该 API Key 的 Token 用量) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.4：清除缓存现在连\"悬停凭据\"一起抹掉，清完之后一条都不再自动送翻；攒批从「一次一条」改回真攒批（每批最多 40 条、按字符总量自动收手），设置项的标题与候选项按板块成串送翻、不合批的条目退回队头保持屏幕顺序；设置项的说明一律照旧「鼠标移上去显示后才翻译」，粒度不放宽) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -73,14 +73,18 @@ namespace Cs2AutoTranslator
         }
 
         // 反馈2：同时在飞的网络请求数。3 条是 2026-09 那轮定的；v1.0.5 玩家报「整屏文本要等半天」，抬到 5。
-        // 为什么只抬到 5、以及为什么【不去动每批条数】（BatchKit.MaxItems 仍是 12）：
+        // 为什么是 5、以及每批条数后来为什么改了（v1.2.4，玩家报"翻译比改提示词之前慢很多"）：
         // · 加线程不减少总请求数，只是让它们重叠 —— 收益接近线性，直到撞上限流；真限流由全局退避兜住
         //   （CooldownMs / 连续失败计数），要防的是"5 条一起撞墙后各自退避一遍"。
-        // · 每批条数不敢跟着抬：编号协议要求引擎把「1. 文本 / 2. 文本」逐行原样回出来，一批越长越容易
-        //   在某一格对不齐而【整批作废】—— 作废 = 白烧一次请求 + 退回单条重发，比不加还慢。
-        //   最脆的是 AI 那几家（输出被截断就整批废），MT 那几家只是"没那么容易废"，不是"不会废"。
-        // · 线程越多也越可能把同一屏的文字拆成几批各翻各的，反而多花请求；5 条差不多是这条收益曲线的拐点，
-        //   再往上要先把「按队列层级组批」改掉才划算。要回退只需改回 3，日志第一行照实报并发数。
+        // · 上一版这里写着「每批条数不敢跟着抬，BatchKit.MaxItems 仍是 12」。那个顾虑本身没错
+        //   （编号协议要求引擎把「1. 文本 / 2. 文本」逐行原样回出来，越长越容易有一格对不齐而整批作废），
+        //   但它【不是】那一局慢的原因 —— 实测 155 条里 145 条走的是单条路径，批量请求整局只发出 1 次。
+        //   真正的原因是取货：非阻塞捞 + 5 条线程一起被第一条唤醒 ⇒ 每轮手上只有 1 条 ⇒ 根本凑不成批。
+        //   所以 v1.2.4 改的是取货（TryBatch 里有界等一小会儿，见 BatchWindowMs 那段），
+        //   条数上限同时抬到 40，并用【字符总量】BatchKit.MaxTotalChars 兜住"长文本撑爆 max_tokens"，
+        //   让批量条数随文本长度自动缩，而不是因为怕作废就一律不许攒。
+        // · 线程越多也越可能把同一屏的文字拆成几批各翻各的；5 条差不多是这条收益曲线的拐点。
+        //   要回退只需改回 3，日志第一行照实报并发数。
         private const int kWorkerCount = 5;
 
         private static void WorkerLoop()
@@ -307,6 +311,18 @@ namespace Cs2AutoTranslator
         }
 
         private static int _lastStaleLog;
+
+        // ===== v1.2.4 需求3：不合群的条目退回【队头】而不是队尾 =====
+        // 与 RequeueOrDrop 的差别只有一处：退回位置。攒批时被捞出来又塞不进去的那些（范围不同、
+        // 太长、带换行），本来就排在玩家眼前更前面的位置（扫描自上而下走树），退回队尾等于让
+        // "此刻屏上那几行"排到整屏之后去 —— 玩家这一轮的原话正是"按顺序翻译下来视觉上比较舒服"。
+        // 退回队头 ⇒ 下一个取到它的线程立刻按它自己的范围重新攒批 ⇒ 队列顺序与视觉顺序一致。
+        // 代际判据与 RequeueOrDrop 逐字相同（EngineKit.ResultStillWanted）：清过缓存就不再往回放。
+        private static void ReturnToHeadOrDrop(string src, int gen)
+        {
+            if (EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp)) { TransMap.ReturnToHead(src); return; }
+            DropStale(src);
+        }
 
         private static void DropStale(string src)
         {
@@ -630,8 +646,41 @@ namespace Cs2AutoTranslator
         // ②对不齐的槽位一律按失败处理（退回队列走单条），绝不把甲的译文安到乙头上；
         // ③整批失败只算「一次」全局失败，否则一次网络抖动就是 12 次计数，熔断形同虚设。
         // 返回值 false = 这批没发出去，调用方按原来的单条路径处理 src。
-        // v1.1.5 多带一个 stamp（出发时的清代代际戳）：一批最多 12 条，一次清代如果不管这一格，
-        // 回写的就是 12 条旧译文 + 12 行磁盘缓存 —— 比单条路径"污染"得更多。
+        // v1.1.5 多带一个 stamp（出发时的清代代际戳）：一批最多 40 条，一次清代如果不管这一格，
+        // 回写的就是 40 条旧译文 + 40 行磁盘缓存 —— 比单条路径"污染"得更多。
+        //
+        // ===== v1.2.4 需求2/需求3：为什么实机「翻译比改提示词之前慢很多」=====
+        // 玩家反馈「无论机翻还是 AI 翻译都慢很多」，而 git diff c67faaf..v1.2.3 对 kWorkerCount /
+        // MaxItems / 扫描预算 / 各种间隔【一个数都没动】—— 所以慢的原因不是某一格调参，是【结构】：
+        //   · 扫描器是【一行一行】入队的（走一行排一条），不是攒够一屏再一起排；
+        //   · kWorkerCount=5 条线程全都堵在 Take(500) 上，队列里一出现第一条，5 条线程同时醒过来
+        //     各自把这一条抢走 ⇒ 每条线程手上只有 1 条 ⇒ 下面 todo.Count < 2 ⇒ 走单条路径。
+        // 实机凭据（v1.2.3 那一局，日志 23:02:47 起）：155 条待翻文字里 145 条走了单条请求，
+        // 批量请求【总共只发出 1 次】（那一次 10 条全对上）。批量协议本身没问题，是它从没被喂饱过。
+        // 另一只手是悬停闸（需求2 那一版加的）：整页说明不再随扫描批量入队，而是"玩家 hover 一行才排一条"
+        // —— 这对 MT 引擎尤其致命，因为 MT 那几家 Batchable=false，本来就不攒批，一次往返只有一条文字。
+        // ⚠ 但这一只手【不能】靠放宽说明来治：玩家本轮明确重申"说明依然还是鼠标移上去显示后才翻译"
+        //   （见 HandleRowText 那道闸上方那段话）。说明那一半这一轮一条都不多翻，它变快的唯一来源是
+        //   "同一轮里被 hover 过的几条能进同一个请求"（攒批）而不是"多放几条进去"。
+        // 所以本轮两处一起改：
+        //   ① 取货这一步改成【有界等一小会儿】（下面的 BatchWindowMs）：还没凑到第二条时，
+        //      以 BatchKit.SliceMs 为一片小睡再捞一次，最多等 BatchWindowMs；凑够两条立刻不再等。
+        //      这一等对【标题与候选项】尤其有用：扫描一轮会接连排进几十条同板块的标题，
+        //      有界窗口正好把它们收进同一批（这就是玩家要的"一个板块整体送翻、按顺序下来"）。
+        //      它不拿延迟换批次大小 —— 只等"本来就在排着、马上就到"的那几条。
+        //   ② 不合群/不合范围的条目退回【队头】（TransMap.ReturnToHead），不是队尾。
+        //      它们本来就排在玩家眼前更前面的位置（扫描是自上而下的），退到队尾等于让玩家眼前的
+        //      那几行文字等完整屏路名 —— 玩家这一轮的原话是"按顺序翻译下来视觉上比较舒服"。
+        //      退到队头 ⇒ 下一个取到它的线程立刻按它自己的范围重新攒批 ⇒ 视觉顺序与队列顺序一致。
+        // ⚠ 这一等只发生在【引擎真的会攒批】的那几家（Batchable=true，见 EngineKit）；
+        //   MT 那几家走不到这里（TryBatch 的调用点已按 Batchable 拦过），所以它们的耗时不因这一格而变
+        //   —— 它们这一轮变快是靠"退回队头保序 + 标题/候选项本来就成串入队"，不是靠攒批。
+        //
+        // 攒批窗口：手上还只有 1 条时，最多等这么久再放弃（以 BatchKit.SliceMs 为一片小睡反复捞）。
+        // 250ms 的取法：扫描一轮 1.2 秒、一页几十行 ⇒ 同一板块的那几条通常在几十毫秒内接连入队；
+        // 250 足以接住它们，又短到"就算队列真空着"也只多等四分之一秒（单条路径本来就要一次网络往返，
+        // 这一格的量级远小于它）。凑够两条立刻收手，所以典型情形根本不睡满。
+        private const int BatchWindowMs = 250;
         private static bool TryBatch(TranslatorSetting setting, ITranslationEngine engine, string target,
                                      string src, bool world, int stamp)
         {
@@ -650,18 +699,57 @@ namespace Cs2AutoTranslator
             // 结果就是三种都翻得似是而非。范围不符的条目原样退回（不算失败、不烧预算），
             // 下一条循环会按它自己的范围重新攒批。
             Scope.Category batchScope = TransMap.ScopeOf(src);
+            // ===== v1.2.4 需求2/需求3：有界等一小会儿，把"马上就到"的那几条收进同一批 =====
+            // 旧写法是非阻塞捞（TakeSameTier(src, 0)）：捞不到就 break。而扫描器是【一行一行】入队的，
+            // 5 条工作线程又全堵在 Take 上、第一条一出现就各自抢走一条 ⇒ 每轮 TryBatch 手上永远只有 1 条
+            // ⇒ 走单条路径（实机凭据：v1.2.3 那一局 155 条里 145 条单条，批量请求总共只发出 1 次）。
+            // 现在改成：凑够两条之前，以 SliceMs 为一片小睡再捞一次，最多等 BatchWindowMs 就收手。
+            // 为什么不是"固定等满窗口"：一凑到第二条（够用编号协议了）立刻不再等，正常情形下几乎不睡；
+            // 这一等只为了接住"同一屏同一板块、本来就排在队列里"的那几条，不是拿延迟换批大小。
+            // ⚠ 总量也有一道闸（BatchKit.Fits）：40 条 × 每条最多 300 字的极端组合会撑爆
+            //   Anthropic 那一家钉死的 max_tokens=2048，所以按字符总量提前收手，条数随文本长度自动缩。
+            int totalChars = src.Length;
+            int windowEnd = Environment.TickCount + BatchWindowMs;
             while (items.Count < BatchKit.MaxItems)
             {
-                string more = TransMap.TakeSameTier(src, 0);   // 非阻塞，且只捞同一条队列：绝不把路名混进面板这一批
-                if (more == null) break;
-                if (seen.Add(more))                             // 第一次抓到才处置；重复抓到的直接忽略（它已经在 items 或 deferred 里）
+                // 已经够两条（能走编号协议）⇒ 不再等：只把此刻【已经排在队列里】的顺手收进来。
+                // 还只有一条 ⇒ 以 SliceMs 为一片小睡再捞，最多等满 BatchWindowMs。
+                int wait = 0;
+                if (items.Count < 2)
                 {
-                    if (BatchKit.CanBatch(more) && TransMap.ScopeOf(more) == batchScope) items.Add(more);
-                    else deferred.Add(more);                   // 不能进批（或不同范围）的先记下，等会儿整批退回，避免同一条被反复取放
+                    int left = windowEnd - Environment.TickCount;
+                    if (left <= 0) break;                       // 等满了还没凑到第二条 ⇒ 老老实实走单条
+                    wait = Math.Min(left, BatchKit.SliceMs);
+                }
+                string more = TransMap.TakeSameTier(src, wait); // 只捞同一条队列：绝不把路名混进面板这一批
+                if (more == null)
+                {
+                    if (items.Count >= 2) break;                 // 够一批了，队列此刻空着
+                    continue;                                    // 只有一条，继续等（受窗口约束）
+                }
+                if (seen.Add(more))                              // 第一次抓到才处置
+                {
+                    if (BatchKit.CanBatch(more) && TransMap.ScopeOf(more) == batchScope
+                        && BatchKit.Fits(totalChars, more))
+                    {
+                        items.Add(more);
+                        totalChars += more.Length;
+                    }
+                    else deferred.Add(more);                     // 不能进批（或不同范围/总量超了）先记下，等会儿整批退回
+                }
+                else
+                {
+                    // 重复捞到（同一条既在队头表又在队列里，Requeue/ReturnToHead 都直接 Add、不经 Queued 去重）：
+                    // 【不能就这么算了】—— 它已经被 TakeFrom 记了一笔在飞，这里丢掉就是计数永久不平，
+                    // IsIdle 从此永远说不，界面等不到"真的排空了"的刷新。退回队头由下一次取货消化
+                    //（届时它多半已被本批翻好，取货那一侧会走"已经有了"的短路）。
+                    deferred.Add(more);
                 }
                 if (deferred.Count >= BatchKit.MaxItems * 4) break;
             }
-            foreach (string d in deferred) RequeueOrDrop(d, stamp);
+            // 不合群/不合范围的退回【队头】：它们本来就排在玩家眼前更前面（扫描自上而下），
+            // 退到队尾等于让眼前那几行等完整屏 —— 玩家这一轮点名要的就是"按顺序"。
+            foreach (string d in deferred) ReturnToHeadOrDrop(d, stamp);
 
             // 磁盘缓存命中的就地解决，只把没命中的发出去（同一屏里大部分名字其实早就翻好了）。
             var todo = new List<string>();
@@ -683,10 +771,12 @@ namespace Cs2AutoTranslator
             }
 
             // 凑不满两条就别用编号协议了（单条走原路径语义完全一致）。src 若已被缓存解决，这批就算处理完。
+            // v1.2.4：这一格退的是【已经在这一批里、但不发出去】的那几条 —— 它们可能排在 src 前后，
+            // 一律退回队头，让它们按原顺序被各自的攒批接走（退队尾就乱了视觉顺序，见 ReturnToHeadOrDrop）。
             if (todo.Count < 2 || todo[0] != src)
             {
                 int start = (todo.Count > 0 && todo[0] == src) ? 1 : 0;
-                for (int i = start; i < todo.Count; i++) RequeueOrDrop(todo[i], stamp);
+                for (int i = start; i < todo.Count; i++) ReturnToHeadOrDrop(todo[i], stamp);
                 return start == 0;
             }
 
@@ -1199,6 +1289,11 @@ namespace Cs2AutoTranslator
                 // 不依赖 HookEnabled / Paused 的先后；而紧跟着的 SaveNow 里还有一次 RevertAll（关总开关那条路
                 // 自己也要还原），放在前面的话【这一次点击只扫一遍】，日志里那一行写的也就是「已清除缓存」这个原因。
                 DropdownL10n.RevertAll("已清除缓存");
+                // v1.2.4 需求1：悬停凭据也是"翻译痕迹"的一种。不清它的话，点完清缓存再打开选项页，
+                // 先前 hover 过的行会【不用再 hover 就自动送翻】—— 玩家看到的正是"这个还有记忆功能？"。
+                // 放在 RevertAll 之后：还原那趟要看凭据表（s_Sweep 为真时不看闸，所以先后其实无碍），
+                // 放这儿是为了让日志里"已清除缓存"那条一口气说完清了什么。
+                DropdownL10n.ForgetHoveredDescriptions();
                 TranslatorSetting s = TranslatorSetting.Instance;
                 bool wasOn = s != null && s.Enabled;
                 if (wasOn) s.Enabled = false;    // setter → OnEnabledChanged → SaveNow：写盘 + 可见文字全部回原文
@@ -2386,9 +2481,13 @@ namespace Cs2AutoTranslator
         // ===== 「前端为哪条说明取过词」的小表（v1.2.3 需求2：说明只在被移到眼前之后才送翻）=====
         // 为什么住在 Mod.cs 而不是 DropdownKit.cs：那一份要进零游戏 DLL 的 T3 离线壳，不能有锁也不能有日志。
         // 判据本体（HoldDescription / IsDescriptionKey）在 DropdownKit，这一格只是它的【凭据来源】。
-        // 为什么是【只增不清】的一张表：它记的是"玩家在这一局里看过这一行说明"这件既成事实。
-        // 清它的后果是单向的 —— 说明被重新按住、等下一次 hover，玩家看不出区别；而"什么时候清"本身
-        // 又是一处新判据（换页？换语言？暂停？），§10 第 9 条要求判据只允许一处，所以干脆不清。
+        // 为什么平时【只增不清】：它记的是"玩家在这一局里看过这一行说明"这件既成事实。
+        // 平时不排空的后果是单向的 —— 说明被重新按住、等下一次 hover，玩家看不出区别；而"什么时候清"本身
+        // 若按换页/换语言/暂停各算一处，又是一处新判据（§10 第 9 条要求判据只允许一处），所以平时不清。
+        // ⚠ v1.2.4 玩家实机推翻了这个"只增"：点【清除缓存】之后，先前 hover 过的行照样自动翻，玩家原话
+        //   "难道这个还有记忆功能？清除缓存后所有的翻译痕迹和缓存都要删除的"。这一格确实是翻译痕迹的一种
+        //   （它决定"要不要送翻"），所以现在只有【清除缓存】这一处会排空它 —— 判据仍只有一处（ClearCacheNow），
+        //   不是每轮都问、也不是按页/按语言各清一次，§10 第 9 条不破。
         // 只收说明族的 key：一行一条、一页几十行，量级封顶几千条（到顶见 DescRequestedCap）。
         static readonly HashSet<string> s_DescRequested = new HashSet<string>(StringComparer.Ordinal);
         static readonly object s_DescGate = new object();
@@ -2403,6 +2502,13 @@ namespace Cs2AutoTranslator
             if (key != null && key.StartsWith("Options.", StringComparison.Ordinal)) { Want = true; s_EverOptions = true; }
         }
 
+        // ===== v1.2.4 需求3 的一处【已撤回】设计，留档免得下一轮又想起来 =====
+        // 曾经想在说明这一半加"板块级凭据"（碰过一行 ⇒ 整块说明放行），凭据表都写好了。玩家当场否掉：
+        //   「我说的是设置项标题和设置项……这不包括设置项的说明，说明依然还是鼠标移上去显示后才翻译」。
+        // 所以需求3 的"整板块送翻"只针对【标题 + 候选项】—— 它们本来就不看闸、按扫描顺序入队，
+        // 由 TryBatch 的有界攒批（一个板块的标题会在同一轮里接连入队 ⇒ 自然进同一批）
+        // 与 ReturnToHead 的保序共同满足。说明那一半的粒度【永远是一行】，这条已被退回三次。
+        //
         // 记下"前端为这个说明 id 取过词"（= 玩家把它移到过眼前）。加锁只发生在说明族，
         // 频率等于玩家移动鼠标的次数，不在每一帧的取词热路径上。
         static void NoteDescriptionRequested(string key)
@@ -2424,10 +2530,32 @@ namespace Cs2AutoTranslator
         }
 
         // 扫描器问这一行说明的凭据在不在（唯一读取点，调用方是 HandleRowText）。
+        // ⚠ v1.2.4 需求3 一度想把这一格放宽成"碰过一个板块 ⇒ 整块说明放行"，被玩家当场否掉：
+        //   他的原话是「我说的是设置项标题和设置项，这些每个板块下面都可能有很多条设置项啊，
+        //   同一个板块可以一起送去翻译……这不包括设置项的说明，说明依然还是鼠标移上去显示后才翻译」。
+        //   所以说明这一半的粒度【就是一行】，一个字都不许放宽 —— 这条已经被退回三次了，没有第四次余地。
+        //   "整板块一起送翻"那条需求落在【标题/候选项】那一路（它们本来就不看闸，按扫描顺序入队），
+        //   由攒批（TryBatch 有界窗口）与保序（ReturnToHead）去满足，与这一格无关。
         public static bool DescriptionRequested(string id)
         {
             if (id == null) return false;
             lock (s_DescGate) return s_DescRequested.Contains(id);
+        }
+
+        // v1.2.4 需求1：「清除缓存」把这一格也清掉（玩家口径：清除缓存后所有的翻译痕迹都要没）。
+        // 只由 ClearCacheNow 调用 —— 清掉之后每条说明都要重新 hover 一次才送翻，
+        // 这正是玩家要的形状：点了清缓存、回到全是原文的状态，不再有"刚才看过所以现在自动翻"的记忆。
+        // 与 RevertAll 同一趟清：两者都是"把这一局留下的痕迹归零"，不是两条独立判据。
+        public static void ForgetHoveredDescriptions()
+        {
+            int n;
+            lock (s_DescGate)
+            {
+                n = s_DescRequested.Count;
+                s_DescRequested.Clear();
+                s_DescCapLogged = false;   // 到顶那条日志跟着复位：清完之后是新的一局，到顶了要能再报一次
+            }
+            if (n > 0) ModLog.Info($"[下拉框] 清除缓存：一并抹掉 {n} 条说明悬停凭据（此前 hover 过的说明不再自动送翻，需重新移到眼前）。");
         }
 
         // 每帧主线程入口（Patches.EnsureApplied 里调，与 WorldLabels.Tick / PollHotkeys 同一挂点）。
@@ -2742,9 +2870,9 @@ namespace Cs2AutoTranslator
                         //   委托，跟"是不是当前标签页"无关（凭据：玩家那一局日志「选项行文字 85 处 /
                         //   玩家看不见的行跳过 2 处」，两道 isVisible 闸合计只拦住 2 处）。
                         // ⚠ 还原扫描（s_Sweep）不看这一格：整树还原要连看不见的分区一起退。
+                        string secId = Patches.ReadObj(section, "id") as string;
                         if (!s_Sweep)
                         {
-                            string secId = Patches.ReadObj(section, "id") as string;
                             if (!DropdownKit.ShouldVisitSection(false, gate.Searching, gate.SectionKnown, gate.Section, secId))
                             { t.SkippedSections++; continue; }
                         }
@@ -2752,7 +2880,13 @@ namespace Cs2AutoTranslator
                         if (options == null) continue;
                         if (options.Count > 0) t.Sections++;
                         secNo++;
-                        string where = pageTag + " 区" + secNo;
+                        // v1.2.4：板块键优先用【游戏自己的分区 id】，序号只当兜底。
+                        // 为什么不能只用序号：secNo 只在【没被跳过】的分区上自增，而跳过的分区随玩家点的
+                        // 标签页变（ShouldVisitSection 就在上面拦）⇒ 同一个分区在 A 标签页下叫"区1"、
+                        // 切到 B 标签页后可能叫"区2"。板块 hover 凭据要跨轮次复用，键飘了就会把
+                        // "这个板块碰过"错认成别的板块碰过 ⇒ 那等于凭空放行一片没被看过的说明
+                        //（§10 第 9 条的反面）。secId 是游戏自己写在 section 对象上的，切标签页也不变。
+                        string where = pageTag + " 区" + (string.IsNullOrEmpty(secId) ? secNo.ToString() : secId);
                         foreach (object option in options)
                         {
                             // 读的是 Option.widget 这个自动属性（不是 SettingItemData.widget 那种懒建属性）。
@@ -2998,6 +3132,12 @@ namespace Cs2AutoTranslator
             // 还原扫描（s_Sweep）不看闸：那一轮要把所有页写过的译文退回去，而且它一条新活都不排。
             // 没有 id 的说明（模组硬塞的裸文字，前端 <yd> 直接上屏、从不调取词钩子）也不看闸：
             // 等下去就是永远不翻 —— 实机 358 条说明里 6 条是这种，全是版本字符串一类的死文字。
+            //
+            // ⚠ v1.2.4 需求3 曾试过把这一格放宽成两级（行 + 板块），玩家当场否掉：
+            //   「我说的是设置项标题和设置项……这不包括设置项的说明，说明依然还是鼠标移上去显示后才翻译」。
+            //   所以这一闸的粒度【永远是一行】，凭据只来自"前端为这一行说明的 id 取过词"。
+            //   需求3 要的"整板块一起送翻"落在标题/候选项那一路（它们不看闸，按扫描顺序入队），
+            //   由 TryBatch 的有界攒批 + ReturnToHead 保序满足 —— 与说明这一半无关。
             if (DropdownKit.HoldDescription(s_Sweep, s.Original.id != null, DescriptionRequested(s.Original.id)))
             {
                 t.DescHeld++;
@@ -3416,6 +3556,17 @@ namespace Cs2AutoTranslator
         private static readonly BlockingCollection<string> Pending = new BlockingCollection<string>(new ConcurrentQueue<string>());
         private static readonly BlockingCollection<string> PendingWorld = new BlockingCollection<string>(new ConcurrentQueue<string>());
 
+        // v1.2.4 需求3：攒批时「这一条不属于这一批」的退回，退到【队头】而不是队尾。
+        // 为什么另开一张表而不是往 Pending 里塞：BlockingCollection 只有 Add（排到尾部），
+        // 没有插队 API，硬插要自己实现 IProducerConsumerCollection —— 那是比本轮大得多的动作。
+        // 这一张表就是那个"插队"的最小形状：TakeFrom 在【阻塞之前和之后】都先看它一眼，
+        // 所以被退回的那条一定比后面排着的文字先被再次取走 ⇒ 玩家看到的顺序还是从上往下。
+        // 与两条正式队列一一对应（前台/世界各一张），退回时投哪张与 Requeue 用的是同一个判据。
+        // ⚠ 这里的东西【不占】Queued 之外的任何台账：一条文字从 Take 到 ReturnToHead 期间
+        //   Queued 里一直有它 ⇒ 扫描器再 Enqueue 同一个 src 仍是空操作，不会出现两份。
+        private static readonly ConcurrentQueue<string> HeadFront = new ConcurrentQueue<string>();
+        private static readonly ConcurrentQueue<string> HeadWorld = new ConcurrentQueue<string>();
+
         // v1.2.0 需求5：每条入队文字记住自己的【翻译范围】类目，Take 时原样带出来给提示词用。
         // 为什么必须记：同一条源文本可能从多处入队（选项页一行说明、世界里的路名、资产描述），
         // 提示词要按范围给不同语境（设置界面强调准确、资产描述强调自然），而 Loop 拿到的只有字符串。
@@ -3497,12 +3648,17 @@ namespace Cs2AutoTranslator
         public static bool IsResolved(string src) => Resolved.ContainsKey(src) || Translated.ContainsKey(src) || GivenUp.ContainsKey(src);
 
         // 队列空且没有在飞的请求 = 真的闲下来了（反馈6 的首批刷新判据）。两条队列都算。
-        public static bool IsIdle => Pending.Count == 0 && PendingWorld.Count == 0 && Volatile.Read(ref _inFlight) == 0;
+        // v1.2.4：两张「退回队头」的小表也算活 —— 那里躺着的是已经取走又退回的文字，
+        // 漏算的话会出现"队列说空了、其实还有一条等着被翻"，界面就少刷一次。
+        public static bool IsIdle => Pending.Count == 0 && PendingWorld.Count == 0
+                                     && HeadFront.IsEmpty && HeadWorld.IsEmpty
+                                     && Volatile.Read(ref _inFlight) == 0;
 
         // v1.1.4：前台（界面文字）这一队有没有活。冷却分档靠它判 —— 世界文字那场洪水造成的限流
         // 不该把玩家眼前那一屏一起冻住（用户 2026-10-02 的原话：只有在打开新界面时才判断送翻，
         // 大量文本是背景活，不能让背景活停住前景活）。
-        public static bool HasFrontWork => Pending.Count > 0;
+        // v1.2.4：队头那张表一并算进来（同 IsIdle 的理由）。
+        public static bool HasFrontWork => Pending.Count > 0 || !HeadFront.IsEmpty;
 
         // 这条源文本是不是【世界文字】（路名/区名/贴地文字）—— 与 QueueFor 用的是同一本台账，
         // 所以"走哪条队列"和"该等哪一档冷却"永远是同一个答案。
@@ -3554,10 +3710,33 @@ namespace Cs2AutoTranslator
         // 这一屏就得等整批生成完 —— 优先级就白分了。
         public static string TakeSameTier(string src, int msTimeout) => TakeFrom(QueueFor(src), msTimeout);
 
+        // 攒批时不合群的条目退回队头（v1.2.4 需求3："按顺序翻译下来视觉上比较舒服"）。
+        // 计数与 Requeue 同一套：取走时 +1（TakeFrom），退回时 −1（这里），下次再被取走又 +1 ——
+        // 一笔借还，绝不双计（双计会让 IsIdle 永远说不，界面等不到"真的排空了"）。
+        public static void ReturnToHead(string src)
+        {
+            if (string.IsNullOrEmpty(src)) return;
+            DecrementInFlight();
+            PushbackFor(QueueFor(src)).Enqueue(src);
+        }
+
+        // 退回表与正式队列一一对应：判据与 QueueFor 同一条（路名回世界那张、界面文字回前台那张）。
+        private static ConcurrentQueue<string> PushbackFor(BlockingCollection<string> q)
+            => ReferenceEquals(q, PendingWorld) ? HeadWorld : HeadFront;
+
         private static string TakeFrom(BlockingCollection<string> q, int msTimeout)
         {
             try
             {
+                // 队头那张表优先：那里躺着的是刚被攒批退回的文字，它们必须比后面排着的先被再取一次。
+                // 先看一眼再阻塞：阻塞期间新退回的东西不会唤醒这一枪，但下一枪（超时后重来）就拿到了，
+                // 最坏多等一个超时，不会丢、也不会饿死。
+                string head;
+                if (PushbackFor(q).TryDequeue(out head))
+                {
+                    Interlocked.Increment(ref _inFlight);
+                    return head;
+                }
                 if (!q.TryTake(out string s, msTimeout)) return null;
                 Interlocked.Increment(ref _inFlight);
                 return s;
@@ -3706,6 +3885,12 @@ namespace Cs2AutoTranslator
             ClearWorldNew();
             while (Pending.TryTake(out _)) { }
             while (PendingWorld.TryTake(out _)) { }
+            // v1.2.4 需求3：退到队头的那些（不合批/不合范围被塞回来的）也必须一起倒干净 ——
+            // 它们不在 Pending 里，漏了这一格的话「清除缓存」之后它们会带着旧代际重新冒出来，
+            // 而且 _inFlight 已被归零、它们却还挂在队头 ⇒ 下一个 Take 会再记一次在飞，
+            // 等于凭空多出一条"没人认领"的活。两行清空是这条不变式的必要条件。
+            while (HeadFront.TryDequeue(out _)) { }
+            while (HeadWorld.TryDequeue(out _)) { }
         }
     }
 

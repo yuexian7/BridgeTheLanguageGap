@@ -1009,6 +1009,10 @@ namespace Cs2AutoTranslator
         // 却占了 system 字段的大半。留下来的只有「翻成什么语言 + 只要译文不要解释」两句。
         // ⚠ 这条路只给测试按钮用。后台翻译链【不走】它：那边的文本真的要上屏，需要完整提示词。
         // ⚠ v1.2.1②：这里也一律英文（langName 仍是目标语言的母语名，由调用点传 NativeName）。
+        // v1.2.3 需求1：测试那一次请求也要计进 token 用量（见 CustomEngine.TestProbe），而计费口径是
+        // 「发出去的提示词」—— 所以这条 system 文案提成常量，三个 ProbeBody（OpenAI 兼容 / Gemini /
+        // Anthropic）与计费点共用同一个串，谁改文案谁就同时改了计费，不可能漂移（§10 判据只允许一处）。
+        public const string ProbeSystem = "Translate the user's text. Reply with the translation only, no notes.";
         public static string TestProbe(string text, string langName)
         {
             string lang = string.IsNullOrEmpty(langName) ? "English" : langName;
@@ -1063,7 +1067,7 @@ namespace Cs2AutoTranslator
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
             sb.Append("\"messages\":[");
-            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\"},");
+            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\"},");
             sb.Append("{\"role\":\"user\",\"content\":\"").Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}");
             sb.Append("]}");
             return sb.ToString();
@@ -1147,7 +1151,7 @@ namespace Cs2AutoTranslator
             int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
             var sb = new StringBuilder();
             sb.Append("{\"systemInstruction\":{\"parts\":[{\"text\":\"")
-              .Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\"}]},");
+              .Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\"}]},");
             sb.Append("\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"")
               .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}],");
             sb.Append("\"generationConfig\":{\"temperature\":0,\"maxOutputTokens\":")
@@ -1222,7 +1226,7 @@ namespace Cs2AutoTranslator
               .Append((2048 + extra).ToString(CultureInfo.InvariantCulture)).Append(',');
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
-            sb.Append("\"system\":\"").Append(Json.Escape("Translate the user's text. Reply with the translation only, no notes.")).Append("\",");
+            sb.Append("\"system\":\"").Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\",");
             sb.Append("\"messages\":[{\"role\":\"user\",\"content\":\"")
               .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}");
             return sb.ToString();

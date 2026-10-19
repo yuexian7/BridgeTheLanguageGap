@@ -178,56 +178,53 @@ namespace Cs2AutoTranslator
             return widget != null && onScreen.Contains(widget);
         }
 
-        // ===== 选项行【说明】那一半的悬停闸（v1.2.2，玩家原话见 Mod.cs 调用处）=====
-        // 需求：「鼠标移到设置项再显示的说明还是会和设置项一起翻译……鼠标移上去才显示的文本也需要在
-        // 移上去后再送去翻译。神奇的是，鼠标移到按钮上显示的说明倒确实是移上去后才开始翻译的。」
-        // 两句看着矛盾，其实说的是同一种 cohtml 行为在两个渲染路径上的差别：
-        //   · 说明/悬停浮层（NamedWidget.description → 前端 infoColumn / tooltip）里的文字是
-        //     LocalizedString，它【随控件属性一起序列化进页面】（decompiled NamedWidget.cs:83-90
-        //     的 WriteProperties 每次都同时写 displayName 与 description）⇒ 只要 props 一发出去，
-        //     前端就在渲染树里了，"移上去才显示"只是 CSS/可见性的事，文字本身【早就送过去了】；
-        //   · 按钮的标题（Button.displayName，同样是 NamedWidget 的字段）玩家看到"移上去才翻"，
-        //     是因为那条链走的是 cohtml 的 SWIG director 打进 UILocalizationManager.Translate 的
-        //     取词钩子（本模组的 Prefix 就挂在那里）—— 按钮被 hover 时前端才第一次为它取词，
-        //     所以请求确实发生在移上去之后。
-        // ⇒ 结论：托管层没有 hover 凭据（OptionsUISystem 的 26 个绑定里没有 hover/focus/descriptionShown，
-        //   Game.dll 里也没有指针进入事件挂到设置行上，见硬约束总表第 88 条末段），但【渲染路径】是有的：
-        //   说明那一半能不能"等 hover 再送"，取决于它是走 props 直出（不能等）还是走取词钩子（天然在等）。
-        // 所以这一格只回答一个问题：这一行的说明此刻【可不可以】先不送。三种答案：
-        //   · 说明有 action（模组用 descriptionAction 动态给值）⇒ 不能等：那条路径前端只认 props，
-        //     而且我们还得把模组原来的 action 换掉才能写入译文（见 Mod.cs 的 WriteRowValue）；
-        //   · 这一行的标题还没落地 ⇒ 不能等：同一屏里标题先出、说明紧随其后是 v1.2.1 的既有妥协，
-        //     提前把说明放出去会让"标题还是英文、说明已经中文"这种半拉子状态先上屏；
-        //   · 还原扫描（整树那一轮）⇒ 不能等：那一轮要把所有页上我们写过的译文放回原文，
-        //     不排新活，这一格对它无意义（调用方直接用 s_Sweep 短路）。
-        // 兜底方向与上面三条闸完全一致：拿不准就放行（宁可多送几条，绝不让玩家 hover 时看到英文）。
-        public static bool MaySendDescription(bool hasAction, bool titleSettled)
+        // ===== 选项行【说明】那一半的悬停闸（v1.2.3，玩家原话见 Mod.cs 调用处）=====
+        // 需求（玩家第三次提）：「设置项的说明文本还是会一起翻译啊，根本不是鼠标移上去显示后才开始翻译」。
+        // 前两版（v1.2.1「等标题落地」、v1.2.2「标题落地后再延一轮」）改的是【延多久】，都还是整页翻好了
+        // —— 因为它们等的都不是 hover，而是自己那条链上的下一个状态。这一版改的是【等什么】：
+        // 等一个真的只在 hover 那一刻才出现的信号。那个信号前端有，2026-10-19 逐字核过实机 index.js
+        //（ Cities2_Data\Content\Game\UI\index.js，选项页信息栏 z4）：
+        //   const E = "string"==typeof x ? x : null;        // x = g && r ? u ?? c : p，即当前被 hover/键盘聚焦那一行的 path
+        //   infoColumn: E && [ infoTitle:       T.props.displayName ? <yd value={…displayName}/> : <OPTION hash={E}/>
+        //                        infoDescription: T.props.description ? <yd value={…description}/> : <OPTION_DESCRIPTION hash={E}/> ]
+        // ⇒ 两块信息栏整体只在【有一行在眼前】时才渲染，而且只渲染【那一行】的说明；<yd>（Localized）
+        //   对带 id 的 LocalizedString 会调 UILocalizationManager.Translate(id)，正是本模组的取词钩子。
+        //   实机凭据：运行时日志 5 条「首次入队待翻译文本（key=Options.OPTION_DESCRIPTION[…]）」，
+        //   而扫描样例里 352/358 条说明都带这个形状的 id。移开鼠标 p 归 null ⇒ 前端不再取词，
+        //   所以"取过词"这件事天然只发生在玩家真的把它移到眼前的那些行上 —— 这就是托管层拿得到的 hover 凭据。
+        // 判据于是只有一句：这一行说明的 id，前端【取过词】吗？没取过 ⇒ 按住不送。三个入参分别是：
+        //   · sweep（整树还原那一轮）⇒ 不看闸：那一轮要把所有页上我们写过的译文放回原文，得见到每一行；
+        //     它本来也不排新活（Decide 里 MayEnqueue 先挡、Enqueue 分支进不去），放开闸不会多发一条请求。
+        //   · hasId == false ⇒ 没有信号可等：说明是裸文字（模组硬塞 LocalizedString.Value(...) 或
+        //     id==null 的 SettingsUIDescription），前端 <yd> 直接上屏、压根不调取词钩子，等下去就是永远
+        //     不翻。实机 358 条说明里 6 条是这种，全是版本字符串一类本来就不该翻的文字。
+        //   · requested == true ⇒ 玩家已经把它移到眼前，前端此刻正等着这句话，照常走后面的处置。
+        // 兜底方向与前面几道闸（不可见 / 不在屏 / 范围外）一致但【相反】：这一格拿不准就【按住】，
+        // 因为按住的最坏后果是"玩家移上去后 1.2 秒内才变中文"（这正是需求要的行为），
+        // 而放过的最坏后果是"整页说明在没移上去时就被翻完"（这正是玩家三次点名的 bug）。
+        public static bool HoldDescription(bool sweep, bool hasId, bool requested)
         {
-            if (hasAction) return true;      // 动态说明：props 直出，等不了
-            return titleSettled;             // 静态说明：等同行标题先落地
+            return !sweep && hasId && !requested;
         }
 
-        // 说明那一半"延后"的记账名（与 Deferred 分开：它等的不是预算，是 hover/标题落地）。
+        // 说明 id 的形状（唯一一处判据：Mod.cs 的 Prefix 喂闸、HandleRowText 问闸，两边都只问这里）。
+        // 两种形状都收：框架路径产的是 Options.OPTION_DESCRIPTION[<path>]
+        //（decompiled AutomaticSettings.cs:358-373 的 GetDescription 与 ModSetting.cs:313-316 的
+        // GetOptionDescLocaleID，都是方括号形状），第三方直接塞给前端的还有 Options.OPTION_DESCRIPTION:<name>
+        // 这种冒号形状（Scope.cs:78 记的 13 条，含 GROUP/SECTION）。前缀比较不吃 '[' / ':'，
+        // 就是为了让冒号形状也进闸 —— 它同样是"移上去才显示"的说明，没道理放过。
+        public static bool IsDescriptionKey(string key)
+        {
+            if (key == null) return false;
+            return key.StartsWith("Options.OPTION_DESCRIPTION", StringComparison.Ordinal);
+        }
+
+        // 说明那一半"按住"的记账名（与 Deferred 分开：它等的不是预算，是玩家把它移到眼前）。
         // 下一局日志里这两个数要能各自回答"这一轮为什么没送"：Deferred 是限流，
         // DescHeld 是这一格故意按住的。混在一起就分不清是"舍不得送"还是"没钱送"。
-        public const string DescHeldLabel = "说明等悬停/标题落地延后";
-
-        // ===== 标题"算落地了"的三个条件（v1.2.2，把 TitleSettled 的身子搬进来）=====
-        // 为什么要搬：说明那一半被 desc 闸按住的期间，标题若【永远翻不成】（key 失效、模型一直 400、
-        // 本地预筛判成不用翻），说明会不会跟着永远不出？这个形状只在函数内部成立（TransMap 的三张表
-        // 住在 Mod.cs，进不了零游戏 DLL 的 T3 壳），所以把三个条件做成纯函数，让断言能钉住它。
-        // 三个条件对应 Mod.cs 的 TitleSettled 三格：
-        //   sourceNull  = 这一行压根没有要翻的标题（不翻 / 预筛判掉 / 字典查不到）
-        //   applied     = 译文已经写上控件
-        //   resolved    = 这条源文本已经有了结论（TransMap.IsResolved：翻好 / 判成不用翻 / 已放弃）
-        // ⚠ 顺序无所谓：三者是"或"，谁先谁后答案一样。写成三个入参而不是一个枚举，是让调用方
-        //   （Mod.cs）继续用自己那三张表现算，不用为了可测性改一遍数据结构。
-        // ⚠ resolved 那一格【必须】把永久性失败算进去 —— 漏了它，标题翻不成的那一页就永远卡在
-        //   "等标题"，玩家看到的是"整页说明一条都不翻"，比多送几条更糟。
-        public static bool TitleSettled(bool sourceNull, bool applied, bool resolved)
-        {
-            return sourceNull || applied || resolved;
-        }
+        // ⚠ 这格数【只在首轮见到那一行时】会涨：按住一次就记一次，之后同一行反复被扫到不再计数
+        //（s.Requested 置位后走正常链），所以它的量级是"这一页有多少行没被移上去过"，一眼可验。
+        public const string DescHeldLabel = "说明等悬停（前端取过词才送）";
 
         // 只按引用判等的比较器（net48 没有 System.Collections.Generic.ReferenceEqualityComparer）。
         private sealed class ReferenceComparer : IEqualityComparer<object>
@@ -525,9 +522,11 @@ namespace Cs2AutoTranslator
             // 少了这三格，"没翻"与"懒得翻"在日志里又会长得一模一样（§10 第 66 条）。
             public int SkippedSections; // 因为"不是玩家点着的那个标签页"而整个分区跳过
             public int OffScreen;       // 因为"不在游戏这次算好的在屏清单里"而跳过的行
-            // v1.2.2：说明这一半被悬停闸【故意延后】的处数（同一行的标题还没落地、或这一行有动态 action）。
-            // v1.2.1 那一版它等的是"标题落地"这一个条件；v1.2.2 把判据收成 DropdownKit.MaySendDescription，
-            // 名字与日志文案随之改成"悬停/标题落地"—— 玩家这一轮点的正是"移上去再送"这件事。
+            // v1.2.3：说明这一半被悬停闸【故意按住】的处数（这一行的说明 id 前端还没取过词）。
+            // 三代各改了一版判据：v1.2.1 等"标题落地"、v1.2.2 等"标题落地 + 再延一轮"，玩家两次都说
+            // 整页还是一起翻；v1.2.3 等的是前端真的为这一行说明调过取词钩子（DropdownKit.HoldDescription）。
+            // 下一局期望的形状：玩家刚点开一页、鼠标还没动过时，这一格 ≈ 该页说明的总条数减去眼前那几行；
+            // 而"选项行写入"里带 说明 的样例只在玩家移上去之后才出现。
             public int DescHeld;
             public int OnScreen = -1;   // 本轮在屏清单里有几个控件；-1 = 读不到（退回旧行为）
 

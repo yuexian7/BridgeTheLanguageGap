@@ -54,7 +54,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.2：选项页说明那一半改为「等这一行标题落地后才排」——不再和设置项标题同轮一起送；按钮标题因为走取词钩子本来就是 hover 后才送，行为不变) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.3：选项页说明那一半改成「前端为这一行的说明 id 取过词之后才送」——也就是玩家真的把它移到眼前之后；测试按钮那一次请求现在也计进该 API Key 的 Token 用量) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -2197,10 +2197,15 @@ namespace Cs2AutoTranslator
                 if (!HookEnabled) return true;        // 总开关关闭：放行原文（需求8）。
                 if (Paused) return true;              // 需求2：刚清除缓存 → 暂停期保持原文，不重新入队翻译。
                 if (key == null || data == null) return true;
-                // v1.0.5 需求1：看见 Options.* 来取词，说明选项界面正在渲染 —— 给下拉框扫描器置个标记，
-                // 让它把这一页所有下拉框的候选项一次性入队（不用等玩家点开下拉框）。
-                // 这里只有一次前缀比较 + 一次 volatile 赋值，符合 §10 第 9 条对热路径的要求。
-                if (DropdownL10n.Want == false) DropdownL10n.NoteKeyRequested(key);
+                // v1.0.5 需求1 + v1.2.3 需求2：看见界面来取词，顺手记两笔账（两笔都在 NoteKeyRequested 里）——
+                //   ① 这个词是 Options.OPTION_DESCRIPTION[…] ⇒ 记下"前端为这一行说明取过词"。
+                //     前端只在有一行被移到眼前时才渲染那块信息栏、也只渲染那一行的说明（实机 index.js 与
+                //     日志 5 条 OPTION_DESCRIPTION 首入队实证），所以这一笔就是托管层拿得到的 hover 凭据；
+                //   ② 这个词以 Options. 开头 ⇒ 选项界面正在渲染，给下拉框扫描器置 Want。
+                // ⚠ v1.2.3 起这一句【不再包在 Want==false 里】（v1.2.2 及以前是包的）：①要的是"每条说明 id
+                // 都被记到"，而 Want 一旦置位就长期为真，沿用旧的外层判断会把九成的记录机会漏掉。
+                // 成本：一次前缀比较；命中说明族才多一次加锁 + 一次集合查找，而那点频率等于玩家移动鼠标。
+                DropdownL10n.NoteKeyRequested(key);
 
                 // 不翻译本模组自己的选项文字 —— 但只在目标语言是那 12 种官方界面语言之一时（那时 L10n/SelfL10n
                 // 已经按游戏语言出好了手写文案，再机翻只会把 "DeepL" 翻成"深度链接"这类品牌名）。
@@ -2378,11 +2383,51 @@ namespace Cs2AutoTranslator
         const int ScanIntervalMs = 1200;   // 与 RefreshUi 的 1.5s 节流同量级：一轮扫描的实际收益就是几行文字
         const int LogIntervalMs = 8000;    // 统计行最多 8 秒一条，免得挂着省略号时每轮刷一行
 
-        // Prefix 热路径调用：只做一次前缀比较 + 一次赋值，无反射无 IO（§10 第 9 条）。
+        // ===== 「前端为哪条说明取过词」的小表（v1.2.3 需求2：说明只在被移到眼前之后才送翻）=====
+        // 为什么住在 Mod.cs 而不是 DropdownKit.cs：那一份要进零游戏 DLL 的 T3 离线壳，不能有锁也不能有日志。
+        // 判据本体（HoldDescription / IsDescriptionKey）在 DropdownKit，这一格只是它的【凭据来源】。
+        // 为什么是【只增不清】的一张表：它记的是"玩家在这一局里看过这一行说明"这件既成事实。
+        // 清它的后果是单向的 —— 说明被重新按住、等下一次 hover，玩家看不出区别；而"什么时候清"本身
+        // 又是一处新判据（换页？换语言？暂停？），§10 第 9 条要求判据只允许一处，所以干脆不清。
+        // 只收说明族的 key：一行一条、一页几十行，量级封顶几千条（到顶见 DescRequestedCap）。
+        static readonly HashSet<string> s_DescRequested = new HashSet<string>(StringComparer.Ordinal);
+        static readonly object s_DescGate = new object();
+        const int DescRequestedCap = 4096;
+        static bool s_DescCapLogged;
+
+        // Prefix 热路径调用：无反射无 IO（§10 第 9 条）。
         public static void NoteKeyRequested(string key)
         {
+            if (DropdownKit.IsDescriptionKey(key)) NoteDescriptionRequested(key);
             if (Want) return;
-            if (key.StartsWith("Options.", StringComparison.Ordinal)) { Want = true; s_EverOptions = true; }
+            if (key != null && key.StartsWith("Options.", StringComparison.Ordinal)) { Want = true; s_EverOptions = true; }
+        }
+
+        // 记下"前端为这个说明 id 取过词"（= 玩家把它移到过眼前）。加锁只发生在说明族，
+        // 频率等于玩家移动鼠标的次数，不在每一帧的取词热路径上。
+        static void NoteDescriptionRequested(string key)
+        {
+            lock (s_DescGate)
+            {
+                if (s_DescRequested.Contains(key)) return;
+                if (s_DescRequested.Count >= DescRequestedCap)
+                {
+                    if (!s_DescCapLogged)
+                    {
+                        s_DescCapLogged = true;
+                        ModLog.Info($"[下拉框] 说明悬停凭据表到 {DescRequestedCap} 条上限，此后新出现的说明 id 不再记录（后果只是那些行的说明要多等一次悬停才送翻，不会翻错也不会崩）。");
+                    }
+                    return;
+                }
+                s_DescRequested.Add(key);
+            }
+        }
+
+        // 扫描器问这一行说明的凭据在不在（唯一读取点，调用方是 HandleRowText）。
+        public static bool DescriptionRequested(string id)
+        {
+            if (id == null) return false;
+            lock (s_DescGate) return s_DescRequested.Contains(id);
         }
 
         // 每帧主线程入口（Patches.EnsureApplied 里调，与 WorldLabels.Tick / PollHotkeys 同一挂点）。
@@ -2823,29 +2868,22 @@ namespace Cs2AutoTranslator
                 {
                     string rowAt = t.WantsSamples ? where + " " + widget.GetType().Name : null;
                     HandleRowText(nw, true, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
-                    // v1.2.2 需求1：说明那一半要【等鼠标移上去】才送。玩家原话：
-                    //   「鼠标移到设置项再显示的说明还是会和设置项一起翻译，我说过了鼠标移上去才显示的文本
-                    //     也需要在移上去后再送去翻译。神奇的是，鼠标移到按钮上显示的说明倒确实是移上去后
-                    //     才开始翻译的。」
-                    // 两句看着矛盾，其实是同一个 cohtml 机制在两条渲染路径上的差别（一手凭据见
-                    // DropdownKit.MaySendDescription 上方的注释）：
-                    //   · 按钮标题走取词钩子（cohtml SWIG director → UILocalizationManager.Translate，
-                    //     本模组 Prefix 挂的地方）⇒ hover 时前端才第一次为它取词 ⇒ 天然"移上去才翻"；
-                    //   · 说明文字走 props 直出：NamedWidget.WriteProperties 每次都同时写 displayName 与
-                    //     description（decompiled NamedWidget.cs:83-90），props 一发出去前端渲染树里就有了，
-                    //     "移上去才显示"只是 CSS 的事 ⇒ 只要我们在扫描里翻它，就必然跟着标题一起送。
-                    // ⇒ 托管层没有 hover 凭据（26 个绑定里一个都没有，见《docs/硬约束总表.md》第 88 条末段），
-                    //   能做的只有"先不写"：本轮只送标题，说明留原文；等这一行的标题落地后的下一轮再排说明。
-                    //   v1.2.1 的"说明等标题落地"就是这个形状，本版把判据收成 DropdownKit.MaySendDescription，
-                    //   并把"为什么按钮看着是 hover 后才翻"写进同一处注释，免得下一轮又当成 bug 去追。
-                    // ⚠ 还原扫描不看这一格：说明已经写上译文的那些位置必须一起退得回去。
-                    // ⚠ 有 action 的说明（模组用 descriptionAction 动态给值）不等：那条路径前端只认 props，
-                    //   而且我们要写译文就得把模组原来的 action 换掉（见 WriteRowValue），等下去它永远是英文。
-                    bool maySendDesc = s_Sweep || DropdownKit.MaySendDescription(nw.descriptionAction != null,
-                                                                                 TitleSettled(nw));
-                    if (maySendDesc)
-                        HandleRowText(nw, false, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
-                    else t.DescHeld++;
+                    // ===== v1.2.3 需求2：说明那一半【照常调】，按不按住在 HandleRowText 里判 =====
+                    // 玩家原话（这件事第三次提）：「设置项的说明文本还是会一起翻译啊，根本不是鼠标移上去
+                    // 显示后才开始翻译，再仔细修复好。」
+                    // 前两版（v1.2.1「说明等标题落地」、v1.2.2「标题落地后的下一轮再排」）改的都只是【延多久】，
+                    // 等的却是自己这条链上的下一个状态（标题翻完没、译文写上没）⇒ 玩家看到的仍是
+                    // "整页说明跟着一屏翻完"，两轮都没修到点上。本版改的是【等什么】：
+                    // 等一个真的只在 hover 那一刻才出现的信号。前端只在有一行被移到眼前时才渲染那块信息栏，
+                    // 且只渲染【那一行】的说明（实机 index.js 的选项页 z4 / K4.infoDescription 逐字核过：
+                    // `E && … infoDescription: T.props.description ? <yd value={T.props.description}/> : …`），
+                    // 所以"这一行的说明 id 被前端取过词"就等于"玩家把它移到过眼前"。
+                    // 凭据由 Prefix 记（DropdownL10n.NoteKeyRequested），判据是 DropdownKit.HoldDescription，
+                    // 两处合起来才是完整的一条链；日志里对应「说明等悬停（前端取过词才送）N 处」那一格。
+                    // ⚠ 闸必须放在 HandleRowText 里而不是这一句上：说明的 id 可能藏在 descriptionAction 后面
+                    //（模组动态给值），而那个委托每 1.2 秒只能调一次 —— HandleRowText 首轮把它读进 s.Original
+                    // 之后再看 id 才不会重复执行模组的代码。标题那一路没有闸，所以两句都无条件调。
+                    HandleRowText(nw, false, dict, dictReady, guardSelf, enabled, target, active, t, rowAt, pageIsMod);
                 }
 
                 Meta m = MetaOf(widget.GetType());
@@ -2948,6 +2986,24 @@ namespace Cs2AutoTranslator
             }
             if (s.Original.isEmpty) return;
 
+            // ---- v1.2.3 需求2：说明那一半的悬停闸（判据在 DropdownKit.HoldDescription，只此一处）----
+            // 这一行的说明 id 前端还没取过词 ⇒ 玩家还没把它移到眼前，按住不送（t.DescHeld 记一笔）。
+            // ⚠ 这一问必须【每轮都问】，不能拿本轮的答案记账了事：凭据只在玩家 hover 那一刻才会出现，
+            //   而玩家可能这一局从头到尾都不去看某些行 —— 一旦"问过一轮之后放行"，整页说明还是会在
+            //   1.2 秒后照常排队，等于回到玩家已经退回两次的形状（v1.2.1/v1.2.2 都栽在这一步）。
+            //   代价可控：查表只发生在"带说明且前端还没取过词"的行上，一轮一次、每行一次 lock+Contains
+            //   （说明族才进表，量级=页内说明行数；§10 第 81 条查的是周期热路径上只做与变化有关的事，
+            //   这里做的正是唯一有关的那件事）。DescHeld 因此与 v1.2.1/v1.2.2 同一口径：按轮计，
+            //   玩家把鼠标移上去之后这一格掉下来 —— 日志一眼可验。
+            // 还原扫描（s_Sweep）不看闸：那一轮要把所有页写过的译文退回去，而且它一条新活都不排。
+            // 没有 id 的说明（模组硬塞的裸文字，前端 <yd> 直接上屏、从不调取词钩子）也不看闸：
+            // 等下去就是永远不翻 —— 实机 358 条说明里 6 条是这种，全是版本字符串一类的死文字。
+            if (DropdownKit.HoldDescription(s_Sweep, s.Original.id != null, DescriptionRequested(s.Original.id)))
+            {
+                t.DescHeld++;
+                return;
+            }
+
             // ---- 没有 action 的行：模组/别的模组可能自己把这句话换掉了 ----
             // 只有【我们没写过】时才承认"控件里现在这句就是新的原文"。我们写过的时候控件里挂的就是我们的译文，
             // 拿它当原文会把译文再翻一遍（本类所有动作的前提都是"只有我们改过的才归我们还原"，同 StepOnItem）。
@@ -3037,24 +3093,6 @@ namespace Cs2AutoTranslator
                     if (!inScope) t.RowOutOfScope++; else t.RowSkipped++;
                     return;
             }
-        }
-
-        // 这一行的【标题】是否已经处理完（v1.2.1 需求3：说明要排在标题后面；v1.2.2 需求1 沿用）。
-        // 三种"处理完"：这一行压根没有要翻的标题（Source 为 null：不翻、或本地预筛判掉、或字典查不到）、
-        // 译文已经写上控件（Applied）、或这条源文本已经有了结论（翻好了 / 判成不用翻 / 已放弃）。
-        // ⚠ 最后那一格必须用 TransMap.IsResolved 而不是"有没有译文"：永久性失败（key 失效、模型一直 400）
-        //   也要能把说明放出来，否则标题翻不成的那一页就永远卡在"等标题"这一格，玩家看到的是
-        //   "整页说明一条都不翻"—— 那是比多送几条更糟的失效。
-        // ⚠ v1.2.2：这三个条件的【身子】搬到了 DropdownKit.TitleSettled（纯函数，tests/t3 AA3 段有逐条
-        //   断言）。这里只负责把三张表读出来的三个 bool 传过去 —— 判据只允许一处，别在这里再写一套"或"。
-        static bool TitleSettled(NamedWidget w)
-        {
-            RowState st;
-            if (!s_rows.TryGetValue(w, out st)) return false;      // 连行状态都还没建（这一轮标题还没看过）
-            RowSlot n = st.Name;
-            if (n == null || n.Source == null)
-                return DropdownKit.TitleSettled(true, false, false);    // 这一行没有要翻的标题
-            return DropdownKit.TitleSettled(false, n.Applied != null, TransMap.IsResolved(n.Source));
         }
 
         // 这一行的这一半【是不是我们写过的】（v1.1.5 还原扫描用的那把便宜闸门：没写过就一眼都不多看）。
@@ -5609,6 +5647,18 @@ namespace Cs2AutoTranslator
                         if (protocol == CustomAi.ProtocolAnthropic) wc.Headers.Add("anthropic-version", AnthropicApi.Version);
                     });
                 string r = CustomAi.ParseFor(protocol, resp);
+                // v1.2.3 需求1：测试这一颗探针也要计进「该API Key已消耗Token数」。玩家原话：
+                //   「该API KEY消耗token数的数据不会实时刷新吗？我看了一下测试后数值完全没变，游戏重启后才变化。
+                //    如果只是测试这个请求没记进去，那就加进去。」
+                // 原因就这一条：v1.2.2 及以前只有下面 Translate 那条链 AddTokens，测试按钮走的这一条没记。
+                // 计费口径与 Translate 逐字一致（平台报了 usage 用真值、没报按字数估），而且喂进去的提示词
+                // 必须是【这一条真实发出的】那两句：干瘦探针用的是 AiPrompt.ProbeSystem + TestProbe(...)，
+                // 不是 Translate 那条 AiPrompt.System/User（§10 第 9 条：估算与实发必须是同一个来源）。
+                // ⚠ 只有自定义 AI 这一家会累加（它也是唯一显示「已消耗Token数」那几行的引擎）；
+                //   失败（抛异常）不计，与 Translate 同一条规矩；无译文但有 usage 仍计 —— 平台已经把 token 扣了。
+                TranslatorSetting.AddTokens(vendor, Tokens.Charge(
+                    CustomAi.UsageFor(protocol, resp), AiPrompt.ProbeSystem,
+                    AiPrompt.TestProbe(text, Lang.NativeName(toLocale)), r));
                 if (string.IsNullOrEmpty(r))
                     ModLog.Error("[Custom/" + vendor + "/" + protocol + "] 测试探针无译文（模型「" + model + "」）：" + Probe.Trunc(resp ?? "", 200));
                 return r;

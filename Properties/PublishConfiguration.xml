@@ -221,7 +221,7 @@ BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面�
 		     真要考虑发布这一版时，先按交接文档 §1.2 那四步重抓一遍线上正文再镜像：作者在 2026-09-25 发布后 25 分钟
 		     又在网页端加了「浏览我的其它模组 / RAINBOW Series」两段（长描述 6348→6479 字符、shortDescription 改成
 		     英文在前），本地这份在那两处【至今是落后的】，直接推会把他的话删掉（交接文档 §1.2 末尾那条警告就是为此留的）。 -->
-	<ModVersion Value="1.2.2" />
+	<ModVersion Value="1.2.3" />
 	<!--Recommended version of the base game to use the mod-->
 	<!-- 线上 requiredVersion 就是这个值；本机游戏 bundleVersion 实测 1.6.0f1（Unity 2022.3.71f1） -->
 	<GameVersion Value="1.6.*" />

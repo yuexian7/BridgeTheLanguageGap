@@ -191,38 +191,47 @@ namespace Cs2AutoTranslator
         ///     同入参连跑两次整个 body 必须一致、六个范围共用的前缀必须够长（tests/t3 的 prompt.audit /
         ///     prompt.prefix，六条通道各钉一行）。拼接顺序也因此定死：越通用越靠前。
         /// </summary>
-        internal const string kVersion = "1.2.2";
+        internal const string kVersion = "1.2.3";
 
         /// <summary>
-        /// 1.2.2（2026-10-19，同会话续测，仍然只部署本地不上传平台）—— 只回应 v1.2.1 收下的那条妥协：
-        /// 「1.2.0 新增问题：1、鼠标移到设置项再显示的说明还是会和设置项一起翻译，我说过了鼠标移上去
-        ///   才显示的文本也需要在移上去后再送去翻译。神奇的是，鼠标移到按钮上显示的说明倒确实是移上去后
-        ///   才开始翻译的。」
-        /// 两句看着矛盾，其实是同一个 cohtml 机制在两条渲染路径上的差别，逐条查过前端（游戏自带
-        /// Content\Game\UI\index.js，一手凭据）与托管侧（decompiled OptionsUISystem.cs / NamedWidget.cs）：
-        ///   · 按钮标题看着"移上去才翻"：按钮标题走的是 cohtml 的取词链 —— 前端渲染 LocalizedString
-        ///     时（js 里 `useCachedLocalization` / `Localized` 组件那一支）发现它带 id，就调
-        ///     `translate(id)` 打进 cohtml director，再进 `UILocalizationManager.Translate`。
-        ///     本模组的 Harmony Prefix 就挂在那里 ⇒ hover 到某个按钮时前端才第一次为它取词，请求
-        ///     自然发生在移上去之后。所以"按钮看着是对的"不是因为按钮特殊，而是因为它有 id 在跑取词链。
-        ///   · 说明看着"还是跟着设置项一起翻"：`NamedWidget.WriteProperties` 每次都【同时】把
-        ///     displayName 和 description 序列化进 props，前端 `option-page.tsx` 的 infoColumn 直接渲染
-        ///     `props.description`。也就是说"移上去才显示"只是 CSS/焦点的事，props 早在建页时就发出去了。
-        ///     v1.2.1 的扫描器为了翻译它，只能在 props 直出前把译文写回 description，于是【必然跟着标题
-        ///     一起送】—— 玩家看到的就是这个。
-        /// 本版改法（判据收在 DropdownKit.MaySendDescription，一处定义，tests/t3 有断言）：
-        ///   ① 说明这一半继续【不跟着标题同轮送】：本轮只送标题，说明留着原文；
-        ///   ② 标题落地后（TitleSettled）下一轮才排说明 —— 这条与 v1.2.1 相同，是兜底形状，
-        ///      不再冒充 hover 检测；
-        ///   ③ 有 descriptionAction 的说明例外：那条路径前端只认 props，而且写译文必须换掉模组原来的
-        ///      action（WriteRowValue），等下去它永远是英文 ⇒ 直接排，不等；
-        ///   ④ 还原扫描（关翻译 / 换语言 / 关范围）不看这一格：已经写上译文的说明必须一起退得回去；
-        ///   ⑤ 日志把这一格从「说明等标题落地延后」改成「说明等悬停/标题落地延后」，
-        ///      两处计数分开，下一局能直接看出"是故意按住"还是"限流穷住"。
-        /// ⚠ 仍然没有做的：托管侧确实拿不到 hover 事件（OptionsUISystem 的 26 个 JS→C# 绑定里一个
-        ///    hover/focus 都没有，Game.dll 侧也没有指针进入事件挂到设置行上），所以本版【不是】hover
-        ///    检测，是"说明晚于标题、且标题本身已经是真在屏判据筛过的"。真正 hover 即翻的那条链
-        ///    （取词钩子 → Prefix）只对带 id 的文字生效，这里不重复造。
+        /// 1.2.3（2026-10-19，同会话续测，仍然只部署本地不上传平台）—— 两条反馈：
+        /// ① 「该API KEY消耗token数的数据不会实时刷新吗？我看了一下测试后数值完全没变，游戏重启后才变化。
+        ///    如果只是测试这个请求没记进去，那就加进去。如果确实这个数值如果实时变化对性能有影响的话，
+        ///    可以做成在翻译请求全部完成且没有新的请求动作时超过1秒后再去读取刷新。当然原来的方式对性能
+        ///    没啥影响就不用改了。」
+        ///    ⇒ 查下来是【测试这一次请求没记】：v1.2.2 及以前只有 CustomEngine.Translate 那条链
+        ///      TranslatorSetting.AddTokens，测试按钮走的是 CustomEngine.TestProbe 这一条，压根没记，
+        ///      所以"重启后才变化"是别的链把数补上去的假象。本版在 TestProbe 里补同一句记账，口径与
+        ///      Translate 逐字相同（平台报了 usage 用真值、没报按字数估），喂进去的提示词是这一条真实
+        ///      发出的那两句（AiPrompt.ProbeSystem + AiPrompt.TestProbe）—— 为此把散在三个 ProbeBody 里的
+        ///      system 文案提成一个常量，谁改文案谁就同时改了计费，不可能漂移。
+        ///    ⇒ 界面刷新【一行都不加】：选项行的 token 值是 LocalizedValueField（ReadonlyField 派生），
+        ///      本模组那几个 Tok* 行没有 [SettingsUIValueVersion] ⇒ valueVersion 为 null ⇒
+        ///      ReadonlyField.Update() 走轮询支路，每帧 GetValue() 比对，数字一变就自己标脏重发 props。
+        ///      也就是说界面早就已经是实时的，玩家那条"1 秒后再刷"的性能妥协没有必要触发（判据见
+        ///      tests/t3 的 token 段与 decompiled ReadonlyField.cs:41-64）。
+        /// ② 「设置项的说明文本还是会一起翻译啊，根本不是鼠标移上去显示后才开始翻译，再仔细修复好。」
+        ///    —— 这是这条反馈第三次被退回（v1.2.1「说明等标题落地」、v1.2.2「标题落地后的下一轮再排」
+        ///    都是在改"延多久"，等的却是自己这条链上的下一个状态），所以本版换的是【等什么】：
+        ///    · 一手证据（前端 Content\Game\UI\index.js，逐字核过选项页那一段）：设置行的说明不是
+        ///      "随每个控件一起发出去、只是 CSS 藏着"，而是【整块信息栏只在有一行被移到眼前时才渲染】，
+        ///      且只渲染那一行的说明 —— `E && … K4.infoColumn, children: [ infoTitle: props.displayName ? …
+        ///      : <Sc.Options.OPTION hash={E}/>, infoDescription: props.description ? …
+        ///      : <Sc.Options.OPTION_DESCRIPTION hash={E}/> ]`，其中 E 是该行选中项的 id，`<yd>`
+        ///      （Localized）带 id 时在渲染那一刻调 translate(id, fallback)。
+        ///    · 托管侧因此【确实有】hover 凭据：那一调进 cohtml director → UILocalizationManager.Translate
+        ///      → 本模组的 Harmony Prefix。实机日志里 5 行「[Hook] 前缀已生效，首次入队待翻译文本：
+        ///      '…'（key=Options.OPTION_DESCRIPTION[…]）」就是它；同期 358 条说明 id 里 352 条都是
+        ///      Options.OPTION_DESCRIPTION[…]（其余 6 条是模组硬塞的裸文字，id 为 null）。
+        ///    · 本版改法：Prefix 把"前端为哪个说明 id 取过词"记进一张只增不删的集合
+        ///      （DropdownL10n.NoteKeyRequested / DescriptionRequested），扫描器送说明前先问一句
+        ///      DropdownKit.HoldDescription —— 没取过词就按住（日志记「说明等悬停（前端取过词才送）」）。
+        ///      也就是说判据从"我们这条链走到哪一步"换成了"前端真为这一行取过词"，与前两版不是同一个形状。
+        ///    · 仍然说明白的边界：id 为 null 的裸文字说明（版本字符串一类，实机 6/358）前端从不取词，
+        ///      按不住也不该按（等下去就是永远不翻），所以闸只对带 id 的说明生效；键盘焦点那一支
+        ///      （前端 `x = g && r ? u ?? c : p`）也会渲染出说明，同属"移到眼前"，一并算数。
+        /// ⚠ 本版不改 DropdownKit 的零依赖底线（不碰 Unity/Game/Colossal 类型、不加锁、不打日志），
+        ///   悬停凭据表因此挂在 Mod.cs 那一侧（那里本来就有锁与日志）。
         /// </summary>
 
         /// <summary>作者署名。按作者本人要求逐字用 "yuexian"，不是平台账号名 "yuexian7"。</summary>

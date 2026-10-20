@@ -1755,6 +1755,11 @@ namespace Cs2AutoTranslator
         {
             _quittingSeen = true;   // 先置位：即使 BeginShutdown 已被其它路径抢先返回，拆除标记也可靠。
             FlushOnExit("Application.quitting");   // 赶在 BeginShutdown 之前：那条路只管拆，不再写盘
+            // v1.2.4 需求4：把更早的会话从日志里裁掉（只留最近 10 次游戏）。
+            // 位置是刻意选的 —— 排在 FlushOnExit【之后】（设置先落盘，这一格不跟它抢同一批文件）、
+            // BeginShutdown【之前】（那时还在正常状态，不是"进程已拆一半"）。
+            // 方法内部全程 try/catch 且不抛不 Sleep：裁剪失败只是这一局不裁，绝不影响退出。
+            ModLog.TrimSessionsOnExit();
             BeginShutdown("Application.quitting");
             UninstallGuard();
         }
@@ -6040,20 +6045,30 @@ namespace Cs2AutoTranslator
 
         // 只保留最近保存的 3 个日志文件（当前 .log + 最近的 .log.bak 归档），按修改时间倒序，删掉更旧的。
         // 严格限定：文件名以 Cs2AutoTranslator 开头、以 .log 或 .log.bak 结尾 —— 绝不触碰 dll/cache/json。全程吞异常。
+        // v1.2.4 需求4：这条判据（`LogKit.IsOurLogFile`）搬进 TextKit.cs 以便离线壳钉住 ——
+        // 这里不再自己写第二份 StartsWith/EndsWith（两处判据会各自漂移，§10 第 9 条）。
         private const int KeepLogs = 3;
         private static void PruneOldLogs()
         {
             try
             {
+                // v1.2.4 需求4 的收尾：把上一次退出时万一残留的裁剪中间文件清掉。
+                // 什么时候会残留：进程在"写 .tmp 之后、Replace 之前"被强杀（崩溃/任务管理器结束）——
+                // 那种情况下 .tmp 是一份新日志，而它不以 .log 结尾，不会被下面的过滤器命中，
+                // 不主动清就是每崩一次多一份几 MB 的垃圾。只删这一个确定名字，不做通配 ——
+                // 与"只碰自己文件"那条原则一致。
+                try
+                {
+                    string t = FilePath + ".tmp"; if (File.Exists(t)) File.Delete(t);
+                }
+                catch { }
+
                 string dir = Path.GetDirectoryName(FilePath);
                 if (string.IsNullOrEmpty(dir)) return;
                 var logs = new List<FileInfo>();
                 foreach (string f in Directory.GetFiles(dir))
                 {
-                    string name = Path.GetFileName(f);
-                    if (!name.StartsWith("Cs2AutoTranslator", StringComparison.Ordinal)) continue;
-                    if (!(name.EndsWith(".log", StringComparison.OrdinalIgnoreCase) ||
-                          name.EndsWith(".log.bak", StringComparison.OrdinalIgnoreCase))) continue;
+                    if (!LogKit.IsOurLogFile(Path.GetFileName(f))) continue;
                     try { logs.Add(new FileInfo(f)); } catch { }
                 }
                 if (logs.Count <= KeepLogs) return;
@@ -6062,6 +6077,118 @@ namespace Cs2AutoTranslator
                     try { logs[i].Delete(); } catch { }
             }
             catch { }
+        }
+
+        // ===== v1.2.4 需求4：日志只保留最近 10 次游戏（含闪退的那几次）=====
+        // 玩家原话：「模组日志log文件只保留最近10次游戏的记录就行了（包括闪退，只要游戏启动并记录下来就算），
+        // 在退出游戏时自动把前面的记录删除。注意不要在游戏退出时对安全性稳定性有影响。」
+        //
+        // 现状（这一版之前）：日志是【一个文件】用 `=== session start … ===` 分隔会话，只按 8 MB 大小归档，
+        // 归档只留 3 份 ⇒ 一个容量上界，但没有"次数"概念。本机实测那一份攒了 112 次会话 / 3.26 MB
+        // （24,963 行）—— 玩家要按【次】管，正好补这一格。
+        //
+        // 为什么上一版一直没做：它需要在【退出时】写盘，而退出路径是本项目最脆弱的一段
+        // （§10 那条"退出到桌面卡死无响应"就是这么来的：Thread.Abort 投递不到原生 socket 读）。
+        // 所以这一格的设计原则是【只做最保守的事，任何一步出问题都退化成"什么都不做"】：
+        //   ① 【只碰这一份文件】：路径就是 FilePath 本身，不递归目录、不 glob、不碰 .log.bak（归档另由
+        //      PruneOldLogs 按份数管）。绝不触碰 translation.cache / 设置 json / dll。
+        //   ② 【量本来就小】：一份日志几 MB，ReadAllLines + WriteAllLines 各一次，几十毫秒量级；
+        //      而且它只在"会话数 > 10"时才真的写（正常一局就是 11 次以上才触发一次）。
+        //   ③ 【原子替换】：先写 .tmp，再 File.Replace（同卷、目标存在时是原子的）。
+        //      绝不在原文件上原地截断 —— 那一步中途崩溃就是"日志被砍成半截 + 尾部全是 0"。
+        //   ④ 【异常全吞】：读失败、写失败、被别人占用（玩家正用记事本开着它）、磁盘满 ——
+        //      任何一条都只是"这一局不裁剪"，绝不向上抛。整个方法包在 try/catch 里，且【不 Sleep、不重试、不等锁】。
+        //   ⑤ 【时机】：挂在 Application.quitting（Unity 主线程，退出通知）而不是 ProcessExit，
+        //      并且排在 FlushOnExit 之后、BeginShutdown 之前 —— 那一刻设置已经落盘、翻译线程已停，
+        //      这一格不会与任何写盘动作抢同一批文件。ProcessExit 兜底路径【不】做裁剪：
+        //      那条路可能在进程已被拆掉一半时执行，多写一个文件不值得。
+        //   ⑥ 【幂等】：写完就算完，不记状态、不需要"上次裁剪过没有"。重复调用只会看到"会话数 ≤ 10"直接返回。
+        //
+        // ⚠ 为什么按【会话头】数次数而不是按天/按大小：玩家要的单位就是"次游戏"，
+        //   而且闪退的那一局也要算一次 —— 闪退那一局正好是玩家最想留的凭据，所以它必须【在窗口里】，
+        //   只把更早的那些切掉。算法（从尾往前数第 KeepSessions 个会话头）见 LogKit.KeepFromLine，
+        //   它被 tests/t3 的 AE 段逐条钉住（含"日志正文里恰好提到 session start 不算会话头"那一格）。
+        private const int KeepSessions = 10;
+
+        // 退出时调用（主线程）。**任何失败都只是"这次不裁剪"**，绝不抛出、绝不阻塞、绝不删掉原文件。
+        public static void TrimSessionsOnExit()
+        {
+            // 与 Write 同一把锁：Write 是 File.AppendAllText（每次自己开关文件），而这里要做
+            // "读全文 → 写临时文件 → 换名"。两者不互斥的话，退出那一瞬间后台 worker 正在写的那一行
+            // 正好落在替换窗口里 —— 轻则那一行丢，重则 AppendAllText 拿到已换名的句柄后
+            // 写进一个马上被删除的 inode（Windows 上是共享冲突异常，被 catch 吞掉，那一行丢失）。
+            // ⚠ 这把锁只在这两个地方用、临界区都是纯文件 I/O（无网络、无 Sleep、无回调），
+            //   所以退出时最多等一次 append 的时间（毫秒级），不会变成卡死的入口。
+            lock (_lock)
+            {
+                try
+                {
+                    string path = FilePath;
+                    if (!File.Exists(path)) return;
+                    string[] lines;
+                    try { lines = File.ReadAllLines(path, Encoding.UTF8); }
+                    catch { return; }                       // 被占用/权限/IO：直接放过，不改动任何东西
+
+                    // 会话数不够就不用动（最常见的一局就是这条早退路：新装玩家、或刚被裁过）。
+                    if (LogKit.CountSessions(lines) <= KeepSessions) return;
+
+                    int from = LogKit.KeepFromLine(lines, KeepSessions);
+                    if (from <= 0 || from >= lines.Length) return;   // 0 = 不用删；>=长度 = 异常形状，宁可不动
+
+                    // 保留的那一段：从 from 开始到最后一行。先写临时文件，再整体换名。
+                    string tmp = path + ".tmp";
+                    try
+                    {
+                        File.WriteAllLines(tmp, SubArray(lines, from), new UTF8Encoding(false));
+                    }
+                    catch
+                    {
+                        // 连临时文件都没写出来（磁盘满/无权限）⇒ 一个字都不动，把可能写了一半的残片清掉。
+                        try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                        return;
+                    }
+
+                    if (!ReplaceFile(tmp, path))
+                    {
+                        // 换名失败：原文件仍然完好（这是下面 ReplaceFile 的设计保证），删掉临时文件收场。
+                        try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                        return;
+                    }
+
+                    ModLog.Info("[日志] 已把更早的会话裁掉：本文件现有 "
+                                + LogKit.CountSessions(File.ReadAllLines(path, Encoding.UTF8))
+                                + " 次游戏记录（上限 " + KeepSessions + " 次）。缓存文件不受影响。");
+                }
+                catch { /* 退出路径上绝不抛：裁剪失败只是这一局没裁，下一次退出还会再试 */ }
+            }
+        }
+
+        // 把 tmp 换成 path。**失败时保证原文件逐字节不变。**
+        //
+        // 为什么只用 File.Replace、不加"先拷贝一份 .old 当退路"：
+        // 上一稿加过那一步，理由是"担心 Replace 把原文件弄坏"。这条担心已经被实机语义推翻 ——
+        // 本机实测（2026-10-20，目标文件被另一句柄以 FileShare.None 独占打开）：
+        //   File.Replace 抛 IOException，而【原文件内容逐字节未变】。
+        // 它内部是"先把源换成目的名、再处理备份"，目标被占用时在第一步之前就失败了，不会出现
+        // "原文件已删、新文件没换上去"的中间态。多出来的那次全文件拷贝（Copy 到 .old）反而是
+        // 整条链上最容易失败的一步（日志被记事本开着时连读都可能失败），
+        // 而且它一旦崩在 Copy 与 Replace 之间就会留一份永远不会被回收的几 MB 垃圾。
+        // 所以按"最少步骤、最少副作用"收口：写 tmp → Replace → 成了就删 tmp（Replace 自己会移走它）。
+        private static bool ReplaceFile(string tmp, string path)
+        {
+            try { File.Replace(tmp, path, null); return true; }
+            catch { return false; }
+        }
+
+        // 取数组的一段（net48 有 Array.Copy，不用 LINQ —— 退出路径上少一层分配）。
+        private static string[] SubArray(string[] src, int from)
+        {
+            if (src == null) return new string[0];
+            if (from <= 0) return src;
+            if (from >= src.Length) return new string[0];
+            var dst = new string[src.Length - from];
+            Array.Copy(src, from, dst, 0, dst.Length);
+            return dst;
         }
 
         // ILog 的方法名是 Info/Warn/Error（不是 BepInEx ManualLogSource 的 LogInfo/LogWarning/LogError），参数类型为 object。

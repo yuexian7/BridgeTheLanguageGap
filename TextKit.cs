@@ -682,6 +682,83 @@ namespace Cs2AutoTranslator
         }
     }
 
+    // ===== 日志只保留最近 N 次会话（v1.2.4 需求4）=====
+    // 玩家原话：「模组日志log文件只保留最近10次游戏的记录就行了（包括闪退，只要游戏启动并记录下来就算），
+    // 在退出游戏时自动把前面的记录删除。注意不要在游戏退出时对安全性稳定性有影响。」
+    //
+    // 为什么判据要放在这个文件（而不是直接在 Mod.cs 里写 I/O）：本文件进得了零游戏 DLL 的 tests\t3 壳。
+    // "截到哪一行"这件事有一个真会算错的边界（会话头在不在最后一行、日志里恰好有一行正文提到
+    // "session start"），而它**一旦算错就是永久丢玩家的日志**（那是他反馈问题唯一的凭据）。
+    // 所以判定做成纯字符串函数在离线壳里逐条钉住，Mod.cs 那边只剩"读文件→调这里→写回去"三步。
+    internal static class LogKit
+    {
+        // 会话分隔行。ModLog.Attach 每次启动写一行，所以它的条数 = 这个文件里记过的启动次数。
+        // ⚠ 判据必须【从行首开始】匹配：正文里也可能出现这几个词（比如某条日志在讲这个机制本身），
+        //   那种行前面有时间戳（`HH:mm:ss [INFO] ...`），行首不是 `===`，因此不会被误当成会话头。
+        //   真实会话头的形状（Attach 里写的就是这一句，前面只有一个换行符）：
+        //     "=== session start 2026-10-20 05:48:17 ==="
+        public const string SessionMark = "=== session start ";
+
+        // 这一行是不是会话头。
+        // allowLeadingSpace：Attach 写的是 "\n=== session start ...\n"，行本身没有前导空白；
+        // 但日志滚动/手工编辑/别的编辑器另存之后可能带上空白，所以这里容忍空白，
+        // 而**不容忍**正文那种"时间戳在前"的形状 —— 那种行首是数字，Trim 之后也不以 `===` 打头。
+        public static bool IsSessionStart(string line)
+        {
+            if (line == null) return false;
+            string t = line.Trim();
+            return t.StartsWith(SessionMark, StringComparison.Ordinal) && t.EndsWith("===", StringComparison.Ordinal);
+        }
+
+        // 数这个文件里有几次会话（= 玩家启动过几次游戏，含闪退的那些）。
+        public static int CountSessions(IList<string> lines)
+        {
+            if (lines == null) return 0;
+            int n = 0;
+            for (int i = 0; i < lines.Count; i++) if (IsSessionStart(lines[i])) n++;
+            return n;
+        }
+
+        // 从第几行开始保留：要让留下的部分【正好包含 keep 次会话】。
+        // 返回值 = 保留起点（0 表示一行都不用删）；lines.Count 表示"全删"（只在 keep<=0 时出现）。
+        //
+        // 算法（从文件尾往前数到第 keep 个会话头）：
+        //   · 会话头之后的正文属于那一次会话；往前数到第 keep 个会话头，就从它开始留 ——
+        //     于是最早的 (总数 - keep) 次会话连头带正文一起被切掉，不会留下半截正文。
+        //   · 若文件开头那段（第一次会话头【之前】的行）存在 —— 比如手工粘贴进来的内容 ——
+        //     它不属于任何一次会话，跟着被切掉是对的（它比任何会话都旧）。
+        //   · keep <= 0 ⇒ 全部切掉（返回 lines.Count）。
+        //   · 会话不足 keep 次 ⇒ 返回 0（什么都不删）。这是最常见的路径，必须零成本。
+        //
+        // ⚠ 为什么按"会话头"而不是按"行数/字节数"：玩家要的单位是【次游戏】。
+        //   按行数切会把最近一次会话砍成半截，那比不切更糟（他要的凭据正好没了）。
+        public static int KeepFromLine(IList<string> lines, int keep)
+        {
+            if (lines == null || lines.Count == 0) return 0;
+            if (keep <= 0) return lines.Count;
+            int seen = 0;
+            for (int i = lines.Count - 1; i >= 0; i--)
+            {
+                if (!IsSessionStart(lines[i])) continue;
+                seen++;
+                if (seen >= keep) return i;      // 从这一行（含）开始保留
+            }
+            return 0;                            // 会话不足 keep 次：一行都不删
+        }
+
+        // 这个日志文件叫什么才算我们的（Mod.cs 的清理只碰这些名字）。
+        // 严格限定：以 Cs2AutoTranslator 开头、以 .log 或 .log.bak 结尾 —— 绝不触碰 dll/cache/json。
+        // 与 v1.0.3 起就有的 PruneOldLogs 判据逐字一致（那一份写在 Mod.cs 里，这里只是把它提取到可离线测的一侧；
+        // 两处判据必须同一个答案，所以 Mod.cs 那边改成调这里，不再自己写第二份 StartsWith/EndsWith）。
+        public static bool IsOurLogFile(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return false;
+            return fileName.StartsWith("Cs2AutoTranslator", StringComparison.Ordinal)
+                && (fileName.EndsWith(".log", StringComparison.OrdinalIgnoreCase)
+                    || fileName.EndsWith(".log.bak", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
     // ===== 凭据文本的清洗（v1.1.7 从 Mod.CleanKey 搬过来）=====
     // 为什么搬：这颗是 v0.15 那次真 bug 的住址 —— 中文输入法会把不可见控制字符混进玩家粘进来的 key，
     // `WebClient.Headers.Add` 当场报 "Specified value has invalid Control characters"（§10 第 19 条）。

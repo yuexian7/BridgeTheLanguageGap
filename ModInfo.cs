@@ -191,7 +191,34 @@ namespace Cs2AutoTranslator
         ///     同入参连跑两次整个 body 必须一致、六个范围共用的前缀必须够长（tests/t3 的 prompt.audit /
         ///     prompt.prefix，六条通道各钉一行）。拼接顺序也因此定死：越通用越靠前。
         /// </summary>
-        internal const string kVersion = "1.2.4";
+        internal const string kVersion = "1.2.5";
+
+        /// <summary>
+        /// 1.2.5（2026-10-21，同一会话续测，仍然只部署本地不上传平台）—— 玩家两条反馈：
+        /// ① 「测试的请求正文太啰嗦：system 已经写了 Translate the user's text…，正文又把指令抄一遍。
+        ///    正文直接发要翻的内容；system 前两句固定、后一句 Translate into X 跟目标语言走，最大化缓存命中。」
+        ///    ⇒ 三个协议（OpenAI 兼容 / Gemini / Anthropic）的 ProbeBody 统一改成
+        ///      system = AiPrompt.ProbeSystemFor(locale)（固定两句话 + " Translate into 母语名."），
+        ///      user   = 原文本身（AiPrompt.TestProbe(text)）。
+        ///      计费口径同步换成这两段（CustomEngine.TestProbe 的 Tokens.Charge 与实发同源）。
+        /// ② 「翻译好慢，调研沉浸式翻译为什么快；思考强度到底生效吗？发送/不发送、档位怎么调请求体都没变，
+        ///    每个引擎都看一下，测试请求体也要跟设置走。」
+        ///    ⇒ 先答第二个问题（实机凭据：作者设置是 厂商=custom、模型=free-b、VendorThinking_custom 为空；
+        ///      即使把发送打开，旧 CustomField 也按模型名认代际，free-b 认不出 ⇒ 一个字段都不发）。
+        ///      v1.2.5 起「自定义」那一格按玩家选的接口格式发通用写法（OpenAI reasoning_effort /
+        ///      Anthropic adaptive+output_config / Gemini thinkingBudget），对方不认就由 PostLlm 的
+        ///      400/422 剥字段兜底。八家内置厂商与四档直连引擎的模型名判据不动：那些是按各家官方文档
+        ///      逐条核过的（gpt-4o 发 reasoning_effort、claude-3-5 发 thinking 都是 400）。
+        ///    ⇒ 每次请求在日志里留一行 `[请求] 引擎/模型 用时=Nms 思考=…`，测试按钮另有一行
+        ///      `[测试] 请求参数：… 思考=… system=N字 正文=N字`。三种"没变"从此一眼可分：
+        ///      玩家关了发送 / 模型名认不出 / 发出去被 400 剥掉。
+        ///    ⇒ 速度：按实机日志量了一遍（每请求 2~7 秒；17 条挤在一次请求里，10 秒后才一起上屏）。
+        ///      沉浸式翻译快在【流式 + 多个小请求并发 + 只翻可见 DOM】，我们没有做流式（风险高、收益只在观感），
+        ///      但"一次吞满 40 条"这一格确实是首屏慢的主因：队列有积压时一条 worker 拿满 40，
+        ///      另外 4 条与后面几十条只能等这一大批生成完。本版加 BatchKit.ShouldLeaveForOthers：
+        ///      手上有 12 条且队列还有活就让给别人；队列空了仍可攒到 40（没人抢，多带只省请求）。
+        ///      ⚠ 这不是把玩家上一轮要的"多送几条"撤掉：40 的硬上限没动，变的只是"有人在等时先让路"。
+        /// </summary>
 
         /// <summary>
         /// 1.2.4（2026-10-19/20，同一天第四次续测，仍然只部署本地不上传平台）—— 三条反馈 + 一次当场纠偏：

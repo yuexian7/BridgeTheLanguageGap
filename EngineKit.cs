@@ -1008,16 +1008,32 @@ namespace Cs2AutoTranslator
         // 所以角色设定、语境、风格、不翻清单、私有区哨兵规则【一条都不需要】—— 它们对连通性零贡献，
         // 却占了 system 字段的大半。留下来的只有「翻成什么语言 + 只要译文不要解释」两句。
         // ⚠ 这条路只给测试按钮用。后台翻译链【不走】它：那边的文本真的要上屏，需要完整提示词。
-        // ⚠ v1.2.1②：这里也一律英文（langName 仍是目标语言的母语名，由调用点传 NativeName）。
+        // ⚠ v1.2.1②：这里也一律英文。
         // v1.2.3 需求1：测试那一次请求也要计进 token 用量（见 CustomEngine.TestProbe），而计费口径是
         // 「发出去的提示词」—— 所以这条 system 文案提成常量，三个 ProbeBody（OpenAI 兼容 / Gemini /
         // Anthropic）与计费点共用同一个串，谁改文案谁就同时改了计费，不可能漂移（§10 判据只允许一处）。
+        // v1.2.5 需求1（玩家原话）：正文里不要再把指令抄一遍。「前两句一模一样（缓存前缀），
+        // 后一句 Translate into X 跟目标语言走，正文只发要翻的文字」——
+        //   system = ProbeSystem（固定前缀）+ " Translate into <母语名>."（整局不变）
+        //   user   = 原文本身
+        // 于是同一目标语言下所有测试请求的 system 逐字节相同，网关的 prompt cache 才有可能命中；
+        // 正文只剩原文，也不再白烧那十几个 token。测试与正式翻译的形状因此一致（指令都在 system）。
         public const string ProbeSystem = "Translate the user's text. Reply with the translation only, no notes.";
-        public static string TestProbe(string text, string langName)
+
+        // 测试探针完整的 system。locale 是【目标语言码】（zh-HANS / ja-JP / sr-Cyrl…），
+        // 语言名在这里经 NativeName 取母语写法；目录外的手输值原样返回，那一句仍然成立。
+        // ⚠ 三个 ProbeBody 与 CustomEngine.TestProbe 的计费必须都调这一条：计费喂的提示词
+        //   与真实发出的是同一份（否则玩家看到的 token 数对不上账）。
+        public static string ProbeSystemFor(string locale)
         {
-            string lang = string.IsNullOrEmpty(langName) ? "English" : langName;
-            return "Translate into " + lang + ". Reply with the translation only, nothing else: " + (text ?? "");
+            string lang = Lang.NativeName(locale);
+            if (string.IsNullOrEmpty(lang)) lang = "English";
+            return ProbeSystem + " Translate into " + lang + ".";
         }
+
+        // 探针正文只有原文。保留这个入口而不是让调用点直接写 text：
+        // ① 与 System/User 的形状对称；② 计费点与三个 ProbeBody 用的是同一处，改形状只改这里。
+        public static string TestProbe(string text) => text ?? "";
     }
 
     // ===== OpenAI 兼容 chat/completions =====
@@ -1058,7 +1074,8 @@ namespace Cs2AutoTranslator
             return sb.ToString();
         }
 
-        // v1.2.0 需求6：测试按钮的瘦身请求体（system 一句话，其余与 Body 相同）。
+        // v1.2.0 需求6：测试按钮的瘦身请求体（system 一句固定指令 + 目标语言，其余与 Body 相同）。
+        // v1.2.5：正文只剩原文（见 AiPrompt.TestProbe 那段）。
         public static string ProbeBody(string model, string text, string locale, string thinkingFragment)
         {
             var sb = new StringBuilder();
@@ -1067,8 +1084,8 @@ namespace Cs2AutoTranslator
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
             sb.Append("\"messages\":[");
-            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\"},");
-            sb.Append("{\"role\":\"user\",\"content\":\"").Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}");
+            sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(AiPrompt.ProbeSystemFor(locale))).Append("\"},");
+            sb.Append("{\"role\":\"user\",\"content\":\"").Append(Json.Escape(AiPrompt.TestProbe(text))).Append("\"}");
             sb.Append("]}");
             return sb.ToString();
         }
@@ -1144,16 +1161,16 @@ namespace Cs2AutoTranslator
             return sb.ToString();
         }
 
-        // v1.2.0 需求6：测试按钮的瘦身请求体。system 只有一句话（AiPrompt.TestProbe），
-        // 其余形状与 Body 逐字相同（含思考片段与输出额度）—— 探针要测的就是这条完整链路。
+        // v1.2.0 需求6：测试按钮的瘦身请求体。system 是固定指令 + 目标语言（AiPrompt.ProbeSystemFor），
+        // 正文只有原文；其余形状与 Body 逐字相同（含思考片段与输出额度）—— 探针要测的就是这条完整链路。
         public static string ProbeBody(string text, string locale, string thinkingFragment, int thinkingExtraTokens)
         {
             int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
             var sb = new StringBuilder();
             sb.Append("{\"systemInstruction\":{\"parts\":[{\"text\":\"")
-              .Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\"}]},");
+              .Append(Json.Escape(AiPrompt.ProbeSystemFor(locale))).Append("\"}]},");
             sb.Append("\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"")
-              .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}],");
+              .Append(Json.Escape(AiPrompt.TestProbe(text))).Append("\"}]}],");
             sb.Append("\"generationConfig\":{\"temperature\":0,\"maxOutputTokens\":")
               .Append((2048 + extra).ToString(CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(thinkingFragment)) sb.Append(',').Append(thinkingFragment);
@@ -1217,7 +1234,7 @@ namespace Cs2AutoTranslator
             return sb.ToString();
         }
 
-        // v1.2.0 需求6：测试按钮的瘦身请求体（system 一句话，其余与 Body 相同）。
+        // v1.2.0 需求6：测试按钮的瘦身请求体（system 是固定指令 + 目标语言，正文只有原文）。
         public static string ProbeBody(string model, string text, string locale, string thinkingFragment, int thinkingExtraTokens)
         {
             int extra = thinkingExtraTokens > 0 ? thinkingExtraTokens : 0;
@@ -1226,9 +1243,9 @@ namespace Cs2AutoTranslator
               .Append((2048 + extra).ToString(CultureInfo.InvariantCulture)).Append(',');
             if (!string.IsNullOrEmpty(thinkingFragment))
                 sb.Append(thinkingFragment).Append(',');
-            sb.Append("\"system\":\"").Append(Json.Escape(AiPrompt.ProbeSystem)).Append("\",");
+            sb.Append("\"system\":\"").Append(Json.Escape(AiPrompt.ProbeSystemFor(locale))).Append("\",");
             sb.Append("\"messages\":[{\"role\":\"user\",\"content\":\"")
-              .Append(Json.Escape(AiPrompt.TestProbe(text, Lang.NativeName(locale)))).Append("\"}]}");
+              .Append(Json.Escape(AiPrompt.TestProbe(text))).Append("\"}]}");
             return sb.ToString();
         }
 
@@ -1847,6 +1864,19 @@ namespace Cs2AutoTranslator
             return string.Empty;      // 机翻引擎与 Cloudflare：ThinkingLevels 给的就是空串
         }
 
+        // 日志用：把「玩家选的档位」与「这一档最终拼出的片段」翻成一句人话。
+        // 为什么需要它：这三件事长得像但处置完全不同 ——
+        //   · level 空 = 玩家自己关了「发送」；
+        //   · level 非空、fragment 空 = 这一家的模型名判据认不出代际，按官方文档不能发（发了就是 400）；
+        //   · fragment 非空 = 真的发出去了。
+        // v1.2.5 玩家报「档位怎么调请求体都没变」，日志里必须能一眼分开前两种。
+        public static string DescribeThinking(string level, string fragment)
+        {
+            if (string.IsNullOrEmpty(level)) return "不发送（玩家选了不发送）";
+            if (string.IsNullOrEmpty(fragment)) return "未发送（这一档对这个模型不适用）";
+            return "发送 " + fragment;
+        }
+
         private static string CustomField(string vendor, string protocol, string model, ThinkLevel lv)
         {
             switch (vendor)
@@ -1860,10 +1890,51 @@ namespace Cs2AutoTranslator
                 case "grok": return GrokField(model, lv);
                 case "glm": return GlmField(model, lv);
             }
-            // custom 那一格：对面是谁只有玩家知道，只能按所选格式的最通用写法发，认不出模型代际就一个字段都不发。
-            if (protocol == ProtocolAnthropic) return ClaudeField(model, lv);
-            if (protocol == ProtocolGemini) return GeminiField(model, lv);
-            return OpenaiField(model, lv);
+            // custom 那一格：对面是谁只有玩家知道，而模型名多半是网关别名（free-b / my-model / 中转站自起的名字），
+            // 按名字认代际必然认不出。v1.2.5 之前这里落空就【一个字段都不发】—— 于是玩家把「发送」打开、
+            // 档位从 None 调到 Max，请求体一个字都不变（实机：网关日志里两次 body 逐字节相同）。
+            // 现在按玩家选的接口格式发最通用的写法：玩家显式打开了「发送」，就该看到这个字段真的出去；
+            // 对方不认这个字段时 PostLlm 会在 400/422 时剥掉它重发一次（这条兜底本来就有）。
+            // ⚠ 只改这一格：八家内置厂商 + 四档直连引擎的模型名判据是按各家官方文档逐条核过的
+            //   （gpt-4o 发 reasoning_effort、claude-3-5 发 thinking 都是 400），不能为了"看起来生效"去动它们。
+            if (protocol == ProtocolAnthropic) return ClaudeGenericField(lv);
+            if (protocol == ProtocolGemini) return GeminiBudgetField(model, lv);
+            return OpenaiGenericField(lv);
+        }
+
+        // 认不出模型名时的通用形状（只给「自定义」那一格用）。
+        // OpenAI：官方 reasoning_effort 的枚举是 none/minimal/low/medium/high/xhigh/max，这里原样映射。
+        // 非推理模型会忽略或拒绝它；拒绝由 PostLlm 的 400/422 剥字段兜底。
+        private static string OpenaiGenericField(ThinkLevel lv)
+        {
+            switch (lv)
+            {
+                case ThinkLevel.Minimal: return Str("reasoning_effort", "minimal");
+                case ThinkLevel.Low: return Str("reasoning_effort", "low");
+                case ThinkLevel.Medium: return Str("reasoning_effort", "medium");
+                case ThinkLevel.High: return Str("reasoning_effort", "high");
+                case ThinkLevel.Xhigh: return Str("reasoning_effort", "xhigh");
+                case ThinkLevel.Max: return Str("reasoning_effort", "max");
+                default: return Str("reasoning_effort", "none");
+            }
+        }
+
+        // Anthropic：认不出代际时按 4.7+/5 那一代的 adaptive 形状发（这是 2026 年的主流写法）。
+        // 万一对面是 4.5/4.6，它会 400 ⇒ PostLlm 剥掉重发，最坏结果只是这一条按平台默认档翻完。
+        // 「关」显式发 disabled：adaptive 那一代收到它才真的不思考。
+        private static string ClaudeGenericField(ThinkLevel lv)
+        {
+            if (IsOff(lv)) return ThinkType("disabled");
+            string effort;
+            switch (lv)
+            {
+                case ThinkLevel.Max: effort = "max"; break;
+                case ThinkLevel.Xhigh: effort = "xhigh"; break;
+                case ThinkLevel.Medium: effort = "medium"; break;
+                case ThinkLevel.Low: case ThinkLevel.Minimal: effort = "low"; break;
+                default: effort = "high"; break;
+            }
+            return ThinkType("adaptive") + ",\"output_config\":" + Str2("effort", effort);
         }
 
         // ---- 各家字段形状 ----
@@ -2039,11 +2110,14 @@ namespace Cs2AutoTranslator
             if (IsOff(lv)) return IsGroqNoOff(model) ? Str("reasoning_effort", "low") : Str("reasoning_effort", "none");
             switch (lv)
             {
-                case ThinkLevel.Minimal: return Str("reasoning_effort", "minimal");
+                // v1.2.5 审查：Groq 官方「超出该模型支持集合的值会被 400 拒掉」，而 gpt-oss 只认
+                // low/medium/high —— 旧写法却把 Minimal/Xhigh/Max 原样发成 minimal/xhigh/max，
+                // 玩家在界面选这三档就是一条必然失败的请求（还白烧一次重试）。这里全部挤进这三档；
+                // 界面仍给七档（与 OpenRouter 共用同一个枚举），多出来的档位落到最接近的真实档。
                 case ThinkLevel.Medium: return Str("reasoning_effort", "medium");
-                case ThinkLevel.Xhigh: return Str("reasoning_effort", "xhigh");
-                case ThinkLevel.Max: return Str("reasoning_effort", "max");
-                default: return Str("reasoning_effort", "low");       // Low，以及认不出的一律往低走
+                case ThinkLevel.High: case ThinkLevel.Xhigh: case ThinkLevel.Max:
+                    return Str("reasoning_effort", "high");
+                default: return Str("reasoning_effort", "low");       // Minimal / Low / 认不出的值
             }
         }
 

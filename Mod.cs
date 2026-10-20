@@ -54,7 +54,7 @@ namespace Cs2AutoTranslator
             // 这行接线漏了不会报错，只会让「模组选项及说明」范围静默失效，所以 PersistSettingsOnly 里打了一行 id 数量日志。
             Scope.SetModIdProvider(RegisteredModIds.Get);
             ModLog.Attach(Log); // 需求8：本模组专属日志文件（同时仍转发给游戏自己的日志系统）。
-            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.4：清除缓存现在连\"悬停凭据\"一起抹掉，清完之后一条都不再自动送翻；攒批从「一次一条」改回真攒批（每批最多 40 条、按字符总量自动收手），设置项的标题与候选项按板块成串送翻、不合批的条目退回队头保持屏幕顺序；设置项的说明一律照旧「鼠标移上去显示后才翻译」，粒度不放宽) ===");
+            ModLog.Info("=== 拯救语言不通（都市天际线2 自动翻译）已载入 (v1.2.5：测试请求正文只剩原文、system 固定前缀+目标语言；自定义端点的思考强度现在真的会改请求体（模型名认不出也按接口格式发，400 自动剥掉重发）；每条请求日志带用时与实际思考字段；攒批有积压时先拿 12 条让并发跑起来，首屏不再等一整批 40 条) ===");
             Instance = this;
             _shutdown = false;
             _quittingSeen = false;
@@ -676,6 +676,18 @@ namespace Cs2AutoTranslator
         //   MT 那几家走不到这里（TryBatch 的调用点已按 Batchable 拦过），所以它们的耗时不因这一格而变
         //   —— 它们这一轮变快是靠"退回队头保序 + 标题/候选项本来就成串入队"，不是靠攒批。
         //
+        // ===== v1.2.5 需求2：首屏优先 —— 有积压时一批先拿 12 条，不让一条线程吞满 40 =====
+        // 玩家这一轮报"翻译好慢好慢"，实机日志逐条量过：每个请求 2~7 秒，而 17 条挤在一次请求里
+        // （22:48:28 那一行）—— 17 条全部生成完才一起上屏，玩家看到的就是"半天没动静，然后一下全出来"。
+        // 旧判据只有"最多 40 条"这一个上限，队列里堆着几十条时，最先拿到第一条的线程会一路捞到 40，
+        // 另外 4 条线程与后面所有文字只能等这一大批。现在在 BatchKit.ShouldLeaveForOthers 里加第二道闸：
+        //   手上够 12 条、且这一队还有积压 ⇒ 立刻停手，把后面的留给别的 worker；
+        //   队列已经空了 ⇒ 继续攒到 40（没人抢，多带几条只省请求，不推迟任何人的首屏）。
+        // ⚠ 40 的硬上限没动，所以玩家上一轮要的"同一个请求多送几条"仍然成立；变的只是"有人在等时先让路"。
+        // ⚠ 12 是 5 条 worker × 12 = 60 条在飞，够铺满一屏；这个数不参与限流判据（429 仍由全局退避兜）。
+        // ⚠ 没有做流式：那需要 SSE 解析 + 把半截译文按编号行安全地映射回上屏控件，任何一格错位都会
+        //   把甲的译文安到乙头上 —— 与本项目"宁可整批作废也绝不猜"的铁律冲突，这一版不碰。
+        //
         // 攒批窗口：手上还只有 1 条时，最多等这么久再放弃（以 BatchKit.SliceMs 为一片小睡反复捞）。
         // 250ms 的取法：扫描一轮 1.2 秒、一页几十行 ⇒ 同一板块的那几条通常在几十毫秒内接连入队；
         // 250 足以接住它们，又短到"就算队列真空着"也只多等四分之一秒（单条路径本来就要一次网络往返，
@@ -708,10 +720,15 @@ namespace Cs2AutoTranslator
             // 这一等只为了接住"同一屏同一板块、本来就排在队列里"的那几条，不是拿延迟换批大小。
             // ⚠ 总量也有一道闸（BatchKit.Fits）：40 条 × 每条最多 300 字的极端组合会撑爆
             //   Anthropic 那一家钉死的 max_tokens=2048，所以按字符总量提前收手，条数随文本长度自动缩。
+            // v1.2.5 需求2：再加一道【并发优先】的闸 —— 手上有 12 条、而队列里还有活时立刻停手。
+            // 40 条的边界只在"整条队列只剩这一批"时才用到；有积压的时候一条线程拿满 40，
+            // 另外 4 条线程与后面几十条文字只能干等这一大批生成完，玩家看到的就是"很久没动静"。
             int totalChars = src.Length;
             int windowEnd = Environment.TickCount + BatchWindowMs;
             while (items.Count < BatchKit.MaxItems)
             {
+                // 够 12 条且后面还有人排队 ⇒ 把剩下的留给别的 worker（判据是纯函数，B 段钉着）。
+                if (BatchKit.ShouldLeaveForOthers(items.Count, TransMap.BacklogSameTier(src))) break;
                 // 已经够两条（能走编号协议）⇒ 不再等：只把此刻【已经排在队列里】的顺手收进来。
                 // 还只有一条 ⇒ 以 SliceMs 为一片小睡再捞，最多等满 BatchWindowMs。
                 int wait = 0;
@@ -3665,6 +3682,16 @@ namespace Cs2AutoTranslator
         // v1.2.4：队头那张表一并算进来（同 IsIdle 的理由）。
         public static bool HasFrontWork => Pending.Count > 0 || !HeadFront.IsEmpty;
 
+        // v1.2.5 需求2：这条文字所在的那一队还有多少条在等（正式队列 + 被退回队头的那张表）。
+        // 攒批的「够 12 条就让给别人」判据用它（BatchKit.ShouldLeaveForOthers）：
+        // 有积压 ⇒ 让另外几条 worker 也能拿到活，首屏不必等一整批 40 条生成完。
+        // 两个 Count 都是队列元数据（ConcurrentQueue.Count 只数段头尾的计数），每次攒批最多读 40 次。
+        public static int BacklogSameTier(string src)
+        {
+            BlockingCollection<string> q = QueueFor(src);
+            return q.Count + PushbackFor(q).Count;
+        }
+
         // 这条源文本是不是【世界文字】（路名/区名/贴地文字）—— 与 QueueFor 用的是同一本台账，
         // 所以"走哪条队列"和"该等哪一档冷却"永远是同一个答案。
         public static bool IsWorldSource(string src) => !string.IsNullOrEmpty(src) && WorldSources.ContainsKey(src);
@@ -5245,21 +5272,58 @@ namespace Cs2AutoTranslator
         // 而且模型改名、上新之后旧名字就不作数）。猜错就是一个 400，而这一句就永远翻不出来了。
         // 所以带思考字段的请求被服务端拒掉时，剥掉思考字段重发一次：buildBody(null, 0) 出来的请求体
         // 与「这一格压根不存在」逐字一致，最差也就是这一句按平台默认档翻完，而不是界面上一片空白。
-        // 只认 400/422：429 与 401/404 跟思考字段无关，重发只是多烧一次请求。
-        protected string PostLlm(string url, Func<string, int, string> buildBody, string thinking, int extraTokens, Action<WebClient> headers)
+        // v1.2.5 需求2：测试按钮点下去时，先把【这一次请求真正带着的参数】写成一行。
+        // 玩家关心的是「我改了档位，请求体到底变没变」；这一行把模型、思考字段与两段提示词的长度
+        // 一次写全（不写 key、不写完整正文）。与下面 [请求] 那一行配合，就是"设置 → 实际请求"的账。
+        protected void NoteProbeParams(string where, string level, string thinking, string system, string text)
         {
-            if (string.IsNullOrEmpty(thinking))
-                return Http.Post(url, buildBody(null, 0), headers, Http.LlmTimeoutMs);
+            ModLog.Info("[测试] 请求参数：" + where
+                        + " 思考=" + CustomAi.DescribeThinking(level, thinking)
+                        + " system=" + (system ?? "").Length.ToString(CultureInfo.InvariantCulture) + "字"
+                        + " 正文=" + (text ?? "").Length.ToString(CultureInfo.InvariantCulture) + "字");
+        }
+
+        // 只认 400/422：429 与 401/404 跟思考字段无关，重发只是多烧一次请求。
+        //
+        // v1.2.5 需求2：每一次请求都在日志里留一行【用时 + 这条请求实际带的思考字段】。
+        // 玩家报「档位怎么调请求体都没变」时，这三件事以前只能靠抓包/网关日志才能分开：
+        //   ① 发送开关是关的（玩家自己选的）⇒ 一个字段都不带；
+        //   ② 开关是开的，但模型名认不出代际 ⇒ 某几家按文档判定「发了就 400」，于是不发；
+        //   ③ 字段发出去了，只是网关不认、被 400 剥掉重发。
+        // 现在这一行把三者写成三种不同的字面，配合每条请求的毫秒数，慢在哪一段也能直接看出来。
+        // 放在 finally 里：失败与超时同样要留一行（玩家报"慢"往往就是那一次超时）。
+        protected string PostLlm(string url, Func<string, int, string> buildBody, string thinking, int extraTokens,
+                                 Action<WebClient> headers, string model = null)
+        {
+            int start = Environment.TickCount;
+            string sent = thinking;          // 实际发出去的那一段；被 400 剥掉后置空
+            bool stripped = false;
             try
             {
-                return Http.Post(url, buildBody(thinking, extraTokens), headers, Http.LlmTimeoutMs);
+                if (string.IsNullOrEmpty(thinking))
+                    return Http.Post(url, buildBody(null, 0), headers, Http.LlmTimeoutMs);
+                try
+                {
+                    return Http.Post(url, buildBody(thinking, extraTokens), headers, Http.LlmTimeoutMs);
+                }
+                catch (Exception ex)
+                {
+                    int st = Http.StatusOf(ex);
+                    if (st != 400 && st != 422) throw;
+                    sent = null;
+                    stripped = true;
+                    ModLog.Info("[" + Name + "] 带思考字段的请求被拒 HTTP " + st + "，剥掉思考字段重发一次（这一句按平台默认档翻）。");
+                    return Http.Post(url, buildBody(null, 0), headers, Http.LlmTimeoutMs);
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                int st = Http.StatusOf(ex);
-                if (st != 400 && st != 422) throw;
-                ModLog.Info("[" + Name + "] 带思考字段的请求被拒 HTTP " + st + "，剥掉思考字段重发一次（这一句按平台默认档翻）。");
-                return Http.Post(url, buildBody(null, 0), headers, Http.LlmTimeoutMs);
+                int ms = unchecked(Environment.TickCount - start);
+                string thought = string.IsNullOrEmpty(thinking)
+                    ? "未发送"
+                    : stripped ? "未发送（400/422 后剥掉）" : sent;
+                ModLog.Info("[请求] " + Name + (string.IsNullOrEmpty(model) ? "" : "/" + model)
+                            + " 用时=" + ms.ToString(CultureInfo.InvariantCulture) + "ms 思考=" + thought);
             }
         }
 
@@ -5669,10 +5733,11 @@ namespace Cs2AutoTranslator
             {
                 string model = GeminiApi.DefaultModel;
                 int extra;
-                string thinking = CustomAi.ThinkingField(Name, null, null, model,
-                    s.GetThinking(Name, null).ToString(), out extra);
+                string level = s.GetThinking(Name, null).ToString();
+                string thinking = CustomAi.ThinkingField(Name, null, null, model, level, out extra);
+                NoteProbeParams("Gemini/" + model, level, thinking, AiPrompt.ProbeSystemFor(toLocale), text);
                 string resp = PostLlm(GeminiApi.TranslateUrl(null, model, key),
-                    (frag, room) => GeminiApi.ProbeBody(text, toLocale, frag, room), thinking, extra, null);
+                    (frag, room) => GeminiApi.ProbeBody(text, toLocale, frag, room), thinking, extra, null, model);
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (string.IsNullOrEmpty(r)) ModLog.Error("[Gemini] 测试探针无译文：" + Probe.Trunc(resp ?? "", 200));
                 return r;
@@ -5695,7 +5760,7 @@ namespace Cs2AutoTranslator
                 string thinking = CustomAi.ThinkingField(Name, null, null, model,
                     s.GetThinking(Name, null).ToString(), out extra);
                 string resp = PostLlm(GeminiApi.TranslateUrl(null, model, key),
-                    (frag, room) => GeminiApi.Body(cat, text, toLocale, frag, room), thinking, extra, null);
+                    (frag, room) => GeminiApi.Body(cat, text, toLocale, frag, room), thinking, extra, null, model);
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (string.IsNullOrEmpty(r)) ModLog.Error("[Gemini] 无译文：" + Probe.Trunc(resp ?? "", 200));
                 return r;
@@ -5722,11 +5787,12 @@ namespace Cs2AutoTranslator
             try
             {
                 int extra;
-                string thinking = CustomAi.ThinkingField(Name, null, null, model,
-                    s.GetThinking(Name, null).ToString(), out extra);
+                string level = s.GetThinking(Name, null).ToString();
+                string thinking = CustomAi.ThinkingField(Name, null, null, model, level, out extra);
+                NoteProbeParams(Name + "/" + model, level, thinking, AiPrompt.ProbeSystemFor(toLocale), text);
                 string resp = PostLlm(OpenAiChat.Url(EngineKit.HostedBase(Name), null),
                     (frag, room) => OpenAiChat.ProbeBody(model, text, toLocale, frag), thinking, extra,
-                    wc => wc.Headers.Add("Authorization", "Bearer " + key));
+                    wc => wc.Headers.Add("Authorization", "Bearer " + key), model);
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 if (string.IsNullOrEmpty(r))
                     ModLog.Error("[" + Name + "] 测试探针无译文（模型「" + model + "」可能已下架）：" + Probe.Trunc(resp ?? "", 200));
@@ -5749,7 +5815,7 @@ namespace Cs2AutoTranslator
                     s.GetThinking(Name, null).ToString(), out extra);
                 string resp = PostLlm(OpenAiChat.Url(EngineKit.HostedBase(Name), null),
                     (frag, room) => OpenAiChat.Body(cat, model, text, toLocale, frag), thinking, extra,
-                    wc => wc.Headers.Add("Authorization", "Bearer " + key));    // 反馈2/3/4：服务端要生成完才回，8/10 秒的通用档位会把整批请求全判成超时
+                    wc => wc.Headers.Add("Authorization", "Bearer " + key), model);    // 反馈2/3/4：服务端要生成完才回，8/10 秒的通用档位会把整批请求全判成超时
                 string r = EngineKit.ParseResponse(Name, null, resp);
                 // 免费模型名会被平台下架，这是这四家最常见的失败原因，所以把模型名写进日志。
                 if (string.IsNullOrEmpty(r))
@@ -5824,8 +5890,11 @@ namespace Cs2AutoTranslator
             string protocol = CustomAi.Protocol(vendor, s.CustomProtocol.ToString());
             string model = s.EffectiveModel;
             int extra;
+            string level = s.ThinkingWire(nameof(TranslatorSetting.Engine.Custom), vendor);
             string thinking = CustomAi.ThinkingField(nameof(TranslatorSetting.Engine.Custom), vendor, protocol, model,
-                s.ThinkingWire(nameof(TranslatorSetting.Engine.Custom), vendor), out extra);
+                level, out extra);
+            NoteProbeParams("Custom/" + vendor + "/" + model + "/" + protocol, level, thinking,
+                AiPrompt.ProbeSystemFor(toLocale), text);
             try
             {
                 string url = CustomAi.TranslateUrl(protocol, vendor, baseUrl, model, key);
@@ -5835,20 +5904,20 @@ namespace Cs2AutoTranslator
                     {
                         wc.Headers.Add(CustomAi.AuthHeaderNameFor(protocol), CustomAi.AuthHeaderValueFor(protocol, key));
                         if (protocol == CustomAi.ProtocolAnthropic) wc.Headers.Add("anthropic-version", AnthropicApi.Version);
-                    });
+                    }, model);
                 string r = CustomAi.ParseFor(protocol, resp);
                 // v1.2.3 需求1：测试这一颗探针也要计进「该API Key已消耗Token数」。玩家原话：
                 //   「该API KEY消耗token数的数据不会实时刷新吗？我看了一下测试后数值完全没变，游戏重启后才变化。
                 //    如果只是测试这个请求没记进去，那就加进去。」
                 // 原因就这一条：v1.2.2 及以前只有下面 Translate 那条链 AddTokens，测试按钮走的这一条没记。
                 // 计费口径与 Translate 逐字一致（平台报了 usage 用真值、没报按字数估），而且喂进去的提示词
-                // 必须是【这一条真实发出的】那两句：干瘦探针用的是 AiPrompt.ProbeSystem + TestProbe(...)，
+                // 必须是【这一条真实发出的】那两句：v1.2.5 起是 AiPrompt.ProbeSystemFor(locale) + TestProbe(text)，
                 // 不是 Translate 那条 AiPrompt.System/User（§10 第 9 条：估算与实发必须是同一个来源）。
                 // ⚠ 只有自定义 AI 这一家会累加（它也是唯一显示「已消耗Token数」那几行的引擎）；
                 //   失败（抛异常）不计，与 Translate 同一条规矩；无译文但有 usage 仍计 —— 平台已经把 token 扣了。
                 TranslatorSetting.AddTokens(vendor, Tokens.Charge(
-                    CustomAi.UsageFor(protocol, resp), AiPrompt.ProbeSystem,
-                    AiPrompt.TestProbe(text, Lang.NativeName(toLocale)), r));
+                    CustomAi.UsageFor(protocol, resp), AiPrompt.ProbeSystemFor(toLocale),
+                    AiPrompt.TestProbe(text), r));
                 if (string.IsNullOrEmpty(r))
                     ModLog.Error("[Custom/" + vendor + "/" + protocol + "] 测试探针无译文（模型「" + model + "」）：" + Probe.Trunc(resp ?? "", 200));
                 return r;
@@ -5890,7 +5959,7 @@ namespace Cs2AutoTranslator
                 {
                     wc.Headers.Add(CustomAi.AuthHeaderNameFor(protocol), CustomAi.AuthHeaderValueFor(protocol, key));
                     if (protocol == CustomAi.ProtocolAnthropic) wc.Headers.Add("anthropic-version", AnthropicApi.Version);
-                });    // 反馈3：DeepSeek/kira 这类网关生成一句就要十几秒，10 秒档位必然全军覆没
+                }, model);    // 反馈3：DeepSeek/kira 这类网关生成一句就要十几秒，10 秒档位必然全军覆没
                 string r = CustomAi.ParseFor(protocol, resp);
                 // 需求2：平台报了 usage 就用真值，没报就按字数本地估算（所以界面文案写了「与实际消耗量可能会有出入」）。
                 // ⚠ 估算时喂进去的提示词必须与【这一条真实发出的】逐字相同，否则玩家看到的 token 数对不上账 ——

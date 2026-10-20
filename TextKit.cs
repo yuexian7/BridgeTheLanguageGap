@@ -483,6 +483,8 @@ namespace Cs2AutoTranslator
         // 所以 v1.2.4 把"总量"也钉住（MaxTotalChars），条数按"短文本多带、长文本少带"自动收缩。
         // 另外旧注释里那个"12 条在实机里从没被填满过"的观测，v1.2.4 查明原因不在条数上限、
         // 而在【取货】那一步（界面一条一条入队、5 条线程又在抢），见 Mod.cs TryBatch 顶部那段。
+        // v1.2.5：40 仍是硬上限，但队列里还有积压时一批只先拿 ParallelItems(12) 条 ——
+        // 一条线程吞满 40 会把另外 4 条线程和后面所有文字一起饿着，首屏要等整批生成完（实机 17 条 10 秒）。
         // ⚠ 再往上提之前先看日志里「一批 N 条」的对上率，那是这条线唯一的一手凭据。
         public const int MaxItems = 40;
 
@@ -503,6 +505,26 @@ namespace Cs2AutoTranslator
         // v1.2.3 那一局 155 条里 145 条因此走了单条请求（批量请求总共只发出 1 次）。
         // 只在"还没凑够第二条"时等，凑够了立刻不等 —— 不拿延迟换批次大小。
         public const int SliceMs = 40;
+
+        // v1.2.5 需求2：有别的线程/下一轮在等着时，一批最多先拿这么多条。
+        // 为什么不是把 MaxItems 直接压回 12：玩家上一轮明确要过"同一个请求多送几条"。
+        // 这两件事其实不冲突 —— 40 条只在一批【独占】整条队列时才是省额度的；
+        // 队列里还有活的时候，一条线程拿满 40 就等于把另外 4 条线程和后面几十条文字一起饿着，
+        // 玩家看到的就是"先出来一两条，然后长时间没动静"（实机：17 条挤在一次请求里，10 秒后才一起上屏）。
+        // 12 的取法：5 条线程 × 12 = 60 条在飞，足够把一屏铺满；再大就只是把首屏往后推。
+        // 判据是纯函数，旧包 T3 能逐条钉住（B 段）。
+        public const int ParallelItems = 12;
+
+        // 这一批要不要停手、把后面的留给别的 worker：
+        //   · 已经到 MaxItems ⇒ 必须停（硬上限）；
+        //   · 已经到 ParallelItems 且队列里还有活 ⇒ 停（让并发去吃掉剩下的，首屏更快出来）；
+        //   · 队列已经空了 ⇒ 继续捞到 MaxItems（没人抢，多带几条只省请求，不推迟任何人的首屏）。
+        // backlog 由调用方现读（TransMap.BacklogSameTier）；这里不碰任何队列类型，T3 直接断言。
+        public static bool ShouldLeaveForOthers(int count, int backlog)
+        {
+            if (count >= MaxItems) return true;
+            return count >= ParallelItems && backlog > 0;
+        }
 
         // 这一批的原文总量还放得下这一条吗（每条 4 字留给 "12. " + 换行）。
         public static bool Fits(int usedChars, string next)

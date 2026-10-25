@@ -1756,10 +1756,15 @@ namespace Cs2AutoTranslator
         // 剩下认不准的那部分由 Mod.cs 的「带思考字段拿到 400/422 就剥掉该字段重发一次」兜底。
 
         // 档位的唯一口径。存盘存的就是这里的词，所以老档的 Off/Low/Medium/High 照读不误。
-        // v1.1.7 新增 None：玩家在界面上选了「不发送」时根本不走这条链（CustomEngine 传空档位进来），
-        // 而 None 是「显式发一个不思考的字段」—— 与 Off 在下面每一个 *Field 里行为完全相同，
-        // 拆成两个词只是因为【界面是两行】：上面一行决定发不发，下面一行决定发哪一档。
+        // v1.2.5 修订：界面上所有档位下拉的首档统一成 Off（原来的 None 词不再出现在任何下拉里），
+        // 但 None 这个词仍然认：老盘存过 "None"/"none" 的照样按原样发（与 Off 走同一支，见 IsOff）。
+        // 两行分工不变：上面一行决定发不发（自定义自填那格是三态），下面一行决定发哪一档。
         public enum ThinkLevel { Off, None, Minimal, Low, Medium, High, Xhigh, Max }
+
+        // v1.2.5 修订：自定义自填那一格的「思考强度」从两态改成三态（关闭/发送/不发送）。
+        // 落盘时空串已经被「不发送」占了，所以「关闭」只能另占一个词 —— 就是这个哨兵。
+        // 它不是档位词，一律不走 ParseLevel（ParseLevel 认不出它会当脏值回 Off）。
+        public const string ThinkLevelDisabled = "Disabled";
 
         public static ThinkLevel ParseLevel(string level)
         {
@@ -1782,24 +1787,23 @@ namespace Cs2AutoTranslator
         private static bool IsOff(ThinkLevel lv) { return lv == ThinkLevel.Off || lv == ThinkLevel.None; }
 
         // 这一格界面上该出现哪几档 = 这一家真实支持的档位集合，~ 分隔。认不出的组合返回空串 = 这一格没有这一行。
-        // v1.1.7：自定义 AI 那八行的首档从 Off 改成 None（上面一行是「发不发」的开关，这一行是「发哪一档」），
-        // 其中 gpt 与 glm 给满七档（None → Max），其余仍按各家真实集合收窄。
+        // v1.2.5 修订：所有行的首档统一成 Off（选项名就是「关」，发的是该家官方认可的关闭写法）。
+        // 其中 gpt 与 glm 给满七档（Off → Max），其余仍按各家真实集合收窄。
         // ⚠ Setting.cs 里那几个「行枚举」必须逐项对得上这张表：多一档玩家能选却发不出去，少一档存过的值读回来会被挤掉。
         public static string ThinkingLevels(string engineName, string vendor)
         {
-            const string SEVEN = "None~Minimal~Low~Medium~High~Xhigh~Max";   // 自定义 AI 八行：首档 None（显式不思考）
-            const string SEVEN_OFF = "Off~Minimal~Low~Medium~High~Xhigh~Max"; // 直连引擎四行：首档 Off（按各家口径关掉）
+            const string SEVEN = "Off~Minimal~Low~Medium~High~Xhigh~Max";    // 八行共用：首档 Off = 按各家口径真关掉
             if (Normalize(engineName) == "custom")
             {
                 switch (Normalize(vendor))
                 {
                     case "gpt": return SEVEN;                                  // 官方枚举：none/minimal/low/medium/high/xhigh/max
-                    case "claude": return "None~Low~Medium~High~Xhigh~Max";     // effort 这一族没有 minimal
-                    case "kimi": return "None~Low~High~Max";                    // K3 只有 low/high/max，没有 medium
+                    case "claude": return "Off~Low~Medium~High~Xhigh~Max";      // effort 这一族没有 minimal
+                    case "kimi": return "Off~Low~High~Max";                     // K3 只有 low/high/max，没有 medium
                     case "qwen": return string.Empty;                           // 非流式调用不许开思考 → 这一行直接不给，见 QwenField
-                    case "deepseek": return "None~Low~High~Max";                // medium 会被平台折成 high，干脆不列
-                    case "gemini": return "None~Minimal~Low~Medium~High";
-                    case "grok": return "None~Low~Medium~High~Xhigh";            // 无 minimal、无 max
+                    case "deepseek": return "Off~Low~High~Max";                 // medium 会被平台折成 high，干脆不列
+                    case "gemini": return "Off~Minimal~Low~Medium~High";
+                    case "grok": return "Off~Low~Medium~High~Xhigh";             // 无 minimal、无 max
                     case "glm": return SEVEN;
                     case Custom: return SEVEN;                                        // v1.2.0：玩家自填端点同样给满七档 —— 上面一行已决定发不发，这一行给全集让玩家自己选
                 }
@@ -1808,8 +1812,8 @@ namespace Cs2AutoTranslator
             switch (Normalize(engineName))
             {
                 case "gemini": return "Off~Minimal~Low~Medium~High";
-                case "groq": return SEVEN_OFF;
-                case "openrouter": return SEVEN_OFF;
+                case "groq": return SEVEN;
+                case "openrouter": return SEVEN;
                 case "siliconflow": return "Off~High~Max";                      // 平台的 effort 只收 high/max
             }
             return string.Empty;
@@ -1847,11 +1851,12 @@ namespace Cs2AutoTranslator
             string en = Normalize(engineName);
             string v = Normalize(vendor);
             string m = Normalize(model);
-            if (string.IsNullOrEmpty(level)) { outputTokens = 0; return string.Empty; }
-            ThinkLevel lv = ClampLevel(ParseLevel(level), ThinkingLevels(en, v));
             string shape = en == "custom" ? Protocol(v, protocol)
                         : en == "gemini" ? ProtocolGemini
                         : ProtocolOpenAi;
+            if (string.IsNullOrEmpty(level)) { outputTokens = 0; return string.Empty; }
+            if (Normalize(level) == Normalize(ThinkLevelDisabled)) { outputTokens = 0; return DisabledField(shape, m); }
+            ThinkLevel lv = ClampLevel(ParseLevel(level), ThinkingLevels(en, v));
             outputTokens = (shape == ProtocolGemini || shape == ProtocolAnthropic) ? Budget(lv) : 0;
             if (en == "custom") return CustomField(v, Protocol(v, protocol), m, lv);
             switch (en)
@@ -1873,8 +1878,18 @@ namespace Cs2AutoTranslator
         public static string DescribeThinking(string level, string fragment)
         {
             if (string.IsNullOrEmpty(level)) return "不发送（玩家选了不发送）";
+            if (Normalize(level) == Normalize(ThinkLevelDisabled)) return "发送（关闭档） " + fragment;
             if (string.IsNullOrEmpty(fragment)) return "未发送（这一档对这个模型不适用）";
             return "发送 " + fragment;
+        }
+
+        // v1.2.5 修订：自定义自填那一格的「关闭」= 明确要对方别思考。对面是谁只有玩家知道，所以按他选的接口格式给形状：
+        // OpenAI 兼容与 Anthropic 都发 thinking:{"type":"disabled"}（Anthropic 官方文档、vLLM/SGLang 一类网关都认这个词）；
+        // Gemini 协议没有 disabled 这个词，用它自己那一代 thinkingBudget 的下限（0，2.5 Pro 是 128，见 GeminiBudgetField）。
+        private static string DisabledField(string protocol, string model)
+        {
+            if (protocol == ProtocolGemini) return GeminiBudgetField(model, ThinkLevel.Off);
+            return ThinkType("disabled");
         }
 
         private static string CustomField(string vendor, string protocol, string model, ThinkLevel lv)
@@ -2045,7 +2060,8 @@ namespace Cs2AutoTranslator
                 case ThinkLevel.Medium: return Str("reasoning_effort", "medium");
                 case ThinkLevel.Xhigh: return Str("reasoning_effort", "xhigh");
                 case ThinkLevel.High: case ThinkLevel.Max: return Str("reasoning_effort", "high");
-                default: return Str("reasoning_effort", "none");
+                // 关：4.5/4.6/4.7 与 fast-reasoning 系官方只收 low/medium/high(/xhigh)，发 none 会被拒（400 → 剥字段 → 按默认档照样思考）
+                default: return Str("reasoning_effort", IsGrokNoOff(model) ? "low" : "none");
             }
         }
 
@@ -2077,7 +2093,7 @@ namespace Cs2AutoTranslator
             if (!StartsWith(model, "gemini")) return string.Empty;   // 玩家自填的怪名字：不是谷歌的形状，一个字段都不发
             if (StartsWith(model, "gemini-3"))
             {
-                bool noMinimal = ContainsAny(model, "3.8", "3-8");    // 官方：3.8 flash 不支持 minimal
+                bool noMinimal = ContainsAny(model, "3.7", "3-7", "3.8", "3-8");   // 官方：3.7-flash 与 3.8 都不收 MINIMAL
                 string floor = noMinimal ? "low" : "minimal";
                 switch (lv)
                 {
@@ -2235,6 +2251,12 @@ namespace Cs2AutoTranslator
         private static bool IsGroqNoOff(string m)
         {
             return Contains(m, "gpt-oss");   // 官方 SDK：gpt-oss 只支持 low/medium/high
+        }
+
+        // Grok：grok-4 与 4.3 有 none 档；4.5/4.6/4.7 与 fast-reasoning 系只有 low/medium/high(/xhigh)，none 直接被拒。
+        private static bool IsGrokNoOff(string m)
+        {
+            return ContainsAny(m, "4.5", "4-5", "4.6", "4-6", "4.7", "4-7", "fast-reasoning");
         }
 
         // ---- 按【接口格式】分发的一组入口（反馈8 之后 Mod.cs 只走这一组）----

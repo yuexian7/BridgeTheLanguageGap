@@ -188,20 +188,26 @@ namespace Cs2AutoTranslator
         // （存盘词 = lv.ToString()，读回 = CustomAi.ParseLevel），数值一律不参与。
         // ⚠ 成员从 0 连续编号，不给数值留空洞。
 
-        // ---- v1.1.7：自定义 AI 那八行的档位（首档 None = 显式不思考）----
-        // 「发不发」由上面一行 AiThinkSend 决定；这一行决定发哪一档，所以第一档是 None 而不是 Off。
-        // gpt 与 glm 给满七档（None → Max），其余仍按各家真实集合收窄（表在 CustomAi.ThinkingLevels）。
-        public enum AiThinkOpenAi { None, Minimal, Low, Medium, High, Xhigh, Max }    // 全七档：gpt / GLM
-        public enum AiThinkAnthropic { None, Low, Medium, High, Xhigh, Max }         // Claude：effort 这一族没有 minimal
-        public enum AiThinkGemini { None, Minimal, Low, Medium, High }               // Gemini 2.5 与 3.x 的并集，认不出的代际由 ThinkingField 挤回
-        public enum AiThinkGrok { None, Low, Medium, High, Xhigh }                   // Grok：无 minimal、无 max
-        public enum AiThinkKimi { None, Low, High, Max }                             // Kimi / DeepSeek：官方都没有 medium
-        public enum AiThinkPlain { None, Minimal, Low, Medium, High, Xhigh, Max }     // 「自定义」端点：v1.2.0 起给满七档，与 gpt/glm 同集合
+        // ---- v1.2.5 修订：自定义 AI 那八行的档位（首档 Off = 按这一家的口径真关掉，与直连引擎四行统一）----
+        // 「发不发」由上面一行决定（自填端点那格是三态）；这一行决定发哪一档。
+        // gpt 与 glm 给满七档（Off → Max），其余仍按各家真实集合收窄（表在 CustomAi.ThinkingLevels）。
+        // ⚠ 老盘存过 "None" 的仍然照读（CustomAi.ParseLevel 认这个词，行为与 Off 逐字相同），只是下拉里不再出现它。
+        public enum AiThinkOpenAi { Off, Minimal, Low, Medium, High, Xhigh, Max }     // 全七档：gpt / GLM
+        public enum AiThinkAnthropic { Off, Low, Medium, High, Xhigh, Max }          // Claude：effort 这一族没有 minimal
+        public enum AiThinkGemini { Off, Minimal, Low, Medium, High }                // Gemini 2.5 与 3.x 的并集，认不出的代际由 ThinkingField 挤回
+        public enum AiThinkGrok { Off, Low, Medium, High, Xhigh }                    // Grok：无 minimal、无 max
+        public enum AiThinkKimi { Off, Low, High, Max }                              // Kimi / DeepSeek：官方都没有 medium
+        public enum AiThinkPlain { Off, Minimal, Low, Medium, High, Xhigh, Max }      // 「自定义」端点：给满七档，与 gpt/glm 同集合
 
-        // ---- v1.1.7：「这一行到底发不发这个字段」的开关（自定义 AI 八家厂商各一格）----
+        // ---- 「这一行到底发不发这个字段」的开关（自定义 AI 八家厂商各一格）----
         // 可选项：选「不发送」时请求体里一个思考字段都没有，平台按它自己的默认档走（多数平台的默认是会思考、
         // 会扣费，所以这一档不是"省钱的推荐项"，只是把决定权交回玩家）；选「发送」时下面才多出「档位」一行。
         public enum AiThinkSend { Off, On }
+
+        // ---- v1.2.5 修订：自填端点那一格是三态（八家里只有它认不出对方是谁，所以多给一个"明确关闭"）----
+        // 关闭 = 按玩家选的接口格式发显式关闭字段（thinking:{"type":"disabled"}，Gemini 协议发 thinkingBudget 下限），
+        // 与「发送 + 档位 Off」的区别：后者是"按这一档发"，前者是不管档位、直接要对方别思考。
+        public enum AiThinkSendCustom { Disable, On, Off }
 
         // ---- 四档直连大模型引擎沿用的老档位集合（首档 Off = 按这一家的口径显式关掉）----
         // 为什么直连引擎不跟着改成两行式：它们没有"可选项"这个诉求（Gemini/Groq/OpenRouter/SiliconFlow
@@ -356,7 +362,7 @@ namespace Cs2AutoTranslator
 
         // v1.1.7：「档位」行的显隐 = 上面那行「思考强度」选了「发送」。
         // 下标与 HideVendor* 完全一致（CustomAi.Vendors 的顺序），两套谓词只差最后那个条件。
-        private bool HideLevelSlot(int i) => HideVendorSlot(i) || !SendsAt(i);
+        private bool HideLevelSlot(int i) => HideVendorSlot(i) || !SendsLevelAt(i);
         private bool HideLevelGpt() => HideLevelSlot(0);
         private bool HideLevelClaude() => HideLevelSlot(1);
         private bool HideLevelKimi() => HideLevelSlot(2);
@@ -749,9 +755,11 @@ namespace Cs2AutoTranslator
         // 不新增磁盘字段，也不推翻第九轮那条"不发就是按默认档在花钱"的结论（老盘的 Off 一律迁移成 发送+None）。
         private readonly CustomAi.ThinkLevel[] Thinking = new CustomAi.ThinkLevel[EngineKit.ThinkingSlots];
 
-        // 这一格到底发不发思考字段。前 9 格 = 自定义 AI 的九家厂商（默认关，千问那一格恒关），
+        // 这一格有没有思考字段要发。前 9 格 = 自定义 AI 的九家厂商（默认不发送，千问那一格恒关），
         // 后 13 格 = 直连引擎（没有开关，恒开）。ClearThinking 里按同一套边界重置。
-        private readonly bool[] ThinkingSend = new bool[EngineKit.ThinkingSlots];
+        // v1.2.5 修订：bool 改成三态 —— 自填端点那格多出"关闭"（要发一个显式关闭字段，但不是按档位发）。
+        private enum ThinkSendMode { NotSend, Send, Disable }
+        private readonly ThinkSendMode[] ThinkingSend = new ThinkSendMode[EngineKit.ThinkingSlots];
 
         private CustomAi.ThinkLevel ThinkingAt(int slot) => (slot >= 0 && slot < Thinking.Length) ? Thinking[slot] : CustomAi.ThinkLevel.Off;
 
@@ -760,15 +768,32 @@ namespace Cs2AutoTranslator
             if (slot >= 0 && slot < Thinking.Length) Thinking[slot] = value;
         }
 
+        private ThinkSendMode ModeAt(int slot)
+        {
+            return (slot >= 0 && slot < ThinkingSend.Length) ? ThinkingSend[slot] : ThinkSendMode.Send;
+        }
+
+        // 这一格要不要发思考字段（"关闭"这一态也是要发的，只是发的是显式关闭字段）。
+        // 直连引擎的格位（>= 厂商数）没有开关，恒定发送；越界同样当"发送"，别把已有档位静默吞掉。
         private bool SendsAt(int slot)
         {
-            // 直连引擎的格位（>= 厂商数）没有开关，恒定发送；越界同样当"发送"，别把已有档位静默吞掉。
-            return slot < 0 || slot >= ThinkingSend.Length || slot >= CustomAi.Vendors.Length || ThinkingSend[slot];
+            return slot < 0 || slot >= ThinkingSend.Length || slot >= CustomAi.Vendors.Length || ThinkingSend[slot] != ThinkSendMode.NotSend;
+        }
+
+        // 「档位」那一行只在这一格真的按档位发时才有意义：关闭与不发送都不显示它。
+        private bool SendsLevelAt(int slot)
+        {
+            return slot < 0 || slot >= ThinkingSend.Length || slot >= CustomAi.Vendors.Length || ThinkingSend[slot] == ThinkSendMode.Send;
         }
 
         private void SetSendsAt(int slot, bool value)
         {
-            if (slot >= 0 && slot < ThinkingSend.Length) ThinkingSend[slot] = value;
+            SetModeAt(slot, value ? ThinkSendMode.Send : ThinkSendMode.NotSend);
+        }
+
+        private void SetModeAt(int slot, ThinkSendMode mode)
+        {
+            if (slot >= 0 && slot < ThinkingSend.Length) ThinkingSend[slot] = mode;
         }
 
         // 某档引擎（vendor 只对「自定义 AI」有意义）自己存的那一档。没有这一行的引擎 → 格位 -1 → 回 Off。
@@ -789,22 +814,28 @@ namespace Cs2AutoTranslator
             SetSendsAt(EngineKit.ThinkingSlot(engineName, vendor), on);
         }
 
-        // 落盘用：不发送就写空串（读回来空串同样判"不发送"，所以不必另立一个哨兵值）。
+        // 落盘用：不发送就写空串；三态里的"关闭"写哨兵词（空串已经被"不发送"占了）；其余写档位词。
         internal string ThinkingWire(string engineName, string vendor)
         {
             int slot = EngineKit.ThinkingSlot(engineName, vendor);
-            if (!SendsAt(slot)) return string.Empty;
+            switch (ModeAt(slot))
+            {
+                case ThinkSendMode.NotSend: return string.Empty;
+                case ThinkSendMode.Disable: return CustomAi.ThinkLevelDisabled;
+            }
             return ThinkingAt(slot).ToString();
         }
 
-        // 读盘用：空串 = 玩家选了「不发送」（或从没配过这一格）；非空 = 发送，并记住那一档。
-        // 老盘写的 "Off" 会走到这里并置成发送 + Off，而 Off 在下面每个 *Field 里与 None 行为完全一致
-        // ⇒ 升级玩家的线上行为一字不变，界面上那一行也只是从 Off 变成 None。
+        // 读盘用：空串 = 玩家选了「不发送」（或从没配过这一格）；哨兵词 = 关闭；其余 = 发送，并记住那一档。
+        // 老盘写的 "Off"/"None" 会走到最后一行，而这两个词在下面每个 *Field 里行为完全一致
+        // ⇒ 升级玩家的线上行为一字不变，界面上那一行只是从 None 变成 Off。
         internal void PutThinkingWire(string engineName, string vendor, string raw)
         {
-            if (string.IsNullOrEmpty(raw)) { SetThinkingOn(engineName, vendor, false); SetThinkingAt(EngineKit.ThinkingSlot(engineName, vendor), CustomAi.ThinkLevel.None); return; }
-            SetThinkingOn(engineName, vendor, true);
-            SetThinkingAt(EngineKit.ThinkingSlot(engineName, vendor), CustomAi.ParseLevel(raw));
+            int slot = EngineKit.ThinkingSlot(engineName, vendor);
+            if (string.IsNullOrEmpty(raw)) { SetModeAt(slot, ThinkSendMode.NotSend); SetThinkingAt(slot, CustomAi.ThinkLevel.Off); return; }
+            if (string.Equals(raw.Trim(), CustomAi.ThinkLevelDisabled, StringComparison.OrdinalIgnoreCase)) { SetModeAt(slot, ThinkSendMode.Disable); return; }
+            SetModeAt(slot, ThinkSendMode.Send);
+            SetThinkingAt(slot, CustomAi.ParseLevel(raw));
         }
 
         // 规范档位 ↔ 界面上那一行的枚举。两边成员名逐字相同，所以只按名字转，数值不参与
@@ -823,7 +854,7 @@ namespace Cs2AutoTranslator
         public void ClearThinking()
         {
             for (int i = 0; i < Thinking.Length; i++) Thinking[i] = CustomAi.ThinkLevel.Off;
-            for (int i = 0; i < ThinkingSend.Length; i++) ThinkingSend[i] = i >= CustomAi.Vendors.Length;
+            for (int i = 0; i < ThinkingSend.Length; i++) ThinkingSend[i] = i >= CustomAi.Vendors.Length ? ThinkSendMode.Send : ThinkSendMode.NotSend;
         }
 
         // ===== v1.1.7：选项页要立刻重算显隐 =====
@@ -924,7 +955,9 @@ namespace Cs2AutoTranslator
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideVendorCustom))]
-        public AiThinkSend ThinkSendVendorCustom { get => SendRow(8); set => SetSendRow(8, value); }
+        // v1.2.5 修订：八家里只有这一格给三态 —— 玩家自填的端点认不出对方是谁，所以需要一个
+        // 「不管档位、直接要求别思考」的选项（关闭 = 发 thinking:{"type":"disabled"}，Gemini 协议发 thinkingBudget 下限）。
+        public AiThinkSendCustom ThinkSendVendorCustom { get => SendRowCustom(8); set => SetSendRowCustom(8, value); }
 
         [SettingsUISection(kTabEngine, kGroupEngine)]
         [SettingsUIHideByCondition(typeof(TranslatorSetting), nameof(HideLevelVendorCustom))]
@@ -940,6 +973,28 @@ namespace Cs2AutoTranslator
             SetSendsAt(slot, on);
             // 从关拨到开时，下面那一行要当场现身（显隐只有 RefreshPage 才重算，见 NoteShapeChanged 的注释）。
             if (on) NoteShapeChanged();
+        }
+
+        // 自填端点那一格的三态（关闭 / 发送 / 不发送）。落到存储上仍是一个三态值，读盘/落盘见 ThinkingWire。
+        private AiThinkSendCustom SendRowCustom(int slot)
+        {
+            switch (ModeAt(slot))
+            {
+                case ThinkSendMode.Disable: return AiThinkSendCustom.Disable;
+                case ThinkSendMode.Send: return AiThinkSendCustom.On;
+                default: return AiThinkSendCustom.Off;
+            }
+        }
+
+        private void SetSendRowCustom(int slot, AiThinkSendCustom value)
+        {
+            ThinkSendMode mode = value == AiThinkSendCustom.Disable ? ThinkSendMode.Disable
+                              : value == AiThinkSendCustom.On ? ThinkSendMode.Send
+                              : ThinkSendMode.NotSend;
+            if (ModeAt(slot) == mode) return;     // 同值不触发：框架初始化会重复赋值
+            SetModeAt(slot, mode);
+            // 「档位」那一行只在这一格按档位发时才有意义 —— 三态之间任何一次拨动都要重算显隐。
+            NoteShapeChanged();
         }
 
         // 当前引擎/厂商的默认模型名。三处共用（下拉框首项、AiModel 兜底、EffectiveModel），

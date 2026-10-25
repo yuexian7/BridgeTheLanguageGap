@@ -218,6 +218,23 @@ namespace Cs2AutoTranslator
         ///      另外 4 条与后面几十条只能等这一大批生成完。本版加 BatchKit.ShouldLeaveForOthers：
         ///      手上有 12 条且队列还有活就让给别人；队列空了仍可攒到 40（没人抢，多带只省请求）。
         ///      ⚠ 这不是把玩家上一轮要的"多送几条"撤掉：40 的硬上限没动，变的只是"有人在等时先让路"。
+        /// ③（2026-10-26，同版本补修，版本号不变）「思考档位选 none 时，接口依然有思考过程」—— 玩家看到的是
+        ///    「我明明选了不思考，日志里那一行还是它在想」。三处一起改：
+        ///    ⇒ 所有档位下拉的首档统一成 Off（八家厂商行原来是 None，四档直连引擎本来就是 Off）：
+        ///      None 这个词从所有下拉里退场，只剩 ThinkLevel 成员留给老盘 —— ParseLevel 仍认 "none"，
+        ///      IsOff 仍是 Off||None ⇒ 存过 None 的老存档行为一字不变（这一条是有断言钉死的）。
+        ///    ⇒ 逐家复核"关"到底发什么（12 格里只有 2 格"不发才是不思考"，其余必须显式关）：
+        ///      OpenAI/Grok/Groq/OpenRouter/custom-openai = reasoning_effort:"none"；
+        ///      Claude/GLM/DeepSeek-v4/custom-anthropic = thinking:{type:"disabled"}；
+        ///      Qwen/SiliconFlow = enable_thinking:false；Gemini = thinkingBudget 该代下限；
+        ///      没有关闭档的就落那一家真实存在的最低档（Kimi K3、GLM 5.3 系、Gemini 3.x 全系、groq 的 gpt-oss）。
+        ///      本轮补掉两条会 400 的形状：Grok 4.5/4.6/4.7 与 fast-reasoning 只收 low/medium/high(/xhigh)，
+        ///      发 none 会被拒 ⇒ 关落 low；Gemini 3.7-flash 与 3.8 都不收 MINIMAL ⇒ 下限抬到 low。
+        ///      ⚠ 八家内置 + 四档直连的模型名判据仍按各家官方文档，本轮只动上面这两条。
+        ///    ⇒ 自填端点那一格（厂商选「自定义」）改成三态下拉：关闭 = 显式发不思考字段（哨兵词 "Disabled"，
+        ///      openai/anthropic 协议发 thinking:{type:"disabled"}、gemini 协议发该代 thinkingBudget 下限）；
+        ///      发送 = 按档位行发；不发送 = 一个字段都不发。落盘用 "Disabled" 当第三态（空串已被"不发送"占着），
+        ///      读盘两侧对称，老盘的空串/档位词语义不变。
         /// </summary>
 
         /// <summary>

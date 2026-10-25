@@ -744,6 +744,8 @@ namespace Cs2AutoTranslator
             // 平台按自己的默认档走（多数平台默认会思考、照常计费）—— 这句话在 desc.thinkingSend 里对玩家说清。
             AddEnZh(t, "enum.thinkSend.off", "Do not send", "不发送", "不發送");
             AddEnZh(t, "enum.thinkSend.on", "Send", "发送", "發送");
+            // v1.2.5 修订：自填端点那一格多出「关闭」——不是"不发这个字段"，而是明确发一个要求别思考的字段。
+            AddEnZh(t, "enum.thinkSend.disable", "Turn off", "关闭", "關閉");
             // 用户定稿：这一句到此为止。原先还写了「下拉框只列这一家真正支持的档位」「关不掉的模型 Off＝最低档」
             // 「认不出模型代际就不发字段」「每档引擎各存自己那一格」「通义千问没有这一行」五条机制说明，
             // 他判定太啰嗦全部删掉。这些都仍然成立，只是不再对玩家解释（逐家真值表见交接文档 §10 第 58 条）。
@@ -757,14 +759,14 @@ namespace Cs2AutoTranslator
             // 所以这一档不是"省钱推荐项"，只是把决定权交回玩家 —— 这句话必须写在说明里，否则玩家会误会。
             AddEnZh(t, "label.thinkingSend", "Reasoning effort", "思考强度", "思考強度");
             AddEnZh(t, "desc.thinkingSend",
-                "Whether to send the reasoning-effort field at all. Not sending it leaves the field out of the request, and the platform then applies its own default — which for most vendors means thinking anyway, and being charged for it.",
-                "要不要向接口发送思考强度这个字段。选择不发送时请求里不带这个字段，平台会按它自己的默认档处理，而多数平台的默认是会思考、照常计费。",
-                "要不要向介面發送思考強度這個欄位。選擇不發送時請求裡不帶這個欄位，平台會按它自己的預設檔處理，而多數平台的預設會思考、照常計費。");
+                "Whether to send the reasoning-effort field at all. Not sending it leaves the field out of the request, and the platform then applies its own default — which for most vendors means thinking anyway, and being charged for it. On an endpoint you type in yourself, Turn off instead sends an explicit no-thinking field, and the level row below is not used.",
+                "要不要向接口发送思考强度这个字段。选择不发送时请求里不带这个字段，平台会按它自己的默认档处理，而多数平台的默认是会思考、照常计费。自填端点选关闭时改为发一个明确要求不思考的字段，下面的档位行不再参与。",
+                "要不要向介面發送思考強度這個欄位。選擇不發送時請求裡不帶這個欄位，平台會按它自己的預設檔處理，而多數平台的預設會思考、照常計費。自填端點選關閉時改為發一個明確要求不思考的欄位，下面的檔位列不再參與。");
             AddEnZh(t, "label.thinkingLevel", "Reasoning effort level", "思考档位", "思考強度檔位");
             AddEnZh(t, "desc.thinkingLevel",
-                "How long the model thinks before it answers; the higher the effort, the slower it is. None asks the platform for no thinking at all.",
-                "模型回答前先想多久，强度越高速度越慢。选 None 是明确要求不思考。",
-                "模型回答前先想多久，強度越高速度越慢。選 None 是明確要求不思考。");
+                "How long the model thinks before it answers; the higher the effort, the slower it is. Off asks the platform for no thinking at all.",
+                "模型回答前先想多久，强度越高速度越慢。选关闭（Off）是明确要求不思考。",
+                "模型回答前先想多久，強度越高速度越慢。選關閉（Off）是明確要求不思考。");
 
             // 「获取模型列表」按钮 + 结果显示行（需求2）。框架一行只放一个控件，所以按钮排在下拉框的上一行。
             AddEnZh(t, "label.fetchModels", "Fetch AI model list", "获取模型列表", "取得模型清單");
@@ -1300,8 +1302,8 @@ namespace Cs2AutoTranslator
             // ⚠ 这里【一律不经过 L()】：L() 在缺手写译文时会走 SelfL10n 机翻，把 Low/High 翻成「低/高」，
             //   而玩家对 off/low/medium/high/max 这些原词的识别度远高于当地语言的对应词，机翻还会让同一家在不同
             //   语言下词长不一样。所以直接钉成员名字面量 —— 12 种语言同一份。
-            // v1.1.7：厂商那八行的档位枚举首档从 Off 改成 None（显式不思考），直连引擎那四行仍是 Off
-            //（按这一家自己的口径关掉）。两套枚举分开注册，别把 Off 与 None 混成同一个词。
+            // v1.2.5 修订：所有档位枚举的首档统一成 Off（选项名叫「关」，发的是该家官方认可的关闭写法）。
+            // 老盘存过的 None 这个词仍然认（CustomAi.ParseLevel 管读），只是下拉里不再出现它。
             foreach (TranslatorSetting.AiThinkOpenAi v in Enum.GetValues(typeof(TranslatorSetting.AiThinkOpenAi)))
                 d[m_Setting.GetEnumValueLocaleID(v)] = v.ToString();
             foreach (TranslatorSetting.AiThinkAnthropic v in Enum.GetValues(typeof(TranslatorSetting.AiThinkAnthropic)))
@@ -1324,6 +1326,10 @@ namespace Cs2AutoTranslator
             // 12 种语言应该有各自的母语说法（其余 9 种由 SelfL10n 机翻补齐）。
             d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSend.Off)] = L("enum.thinkSend.off");
             d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSend.On)] = L("enum.thinkSend.on");
+            // v1.2.5 修订：自填端点那一格的三态（关闭 / 发送 / 不发送）。同样是给人读的指令，照旧过 L()。
+            d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSendCustom.Disable)] = L("enum.thinkSend.disable");
+            d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSendCustom.On)] = L("enum.thinkSend.on");
+            d[m_Setting.GetEnumValueLocaleID(TranslatorSetting.AiThinkSendCustom.Off)] = L("enum.thinkSend.off");
 
             return d;
         }

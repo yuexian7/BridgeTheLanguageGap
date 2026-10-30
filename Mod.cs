@@ -180,8 +180,14 @@ namespace Cs2AutoTranslator
                 // v1.1.4：这一等从此【分档】—— 前台（界面文字）还有活的时候只等前台那一档，
                 // 世界文字（路名/区名）那场洪水造成的限流不许把玩家眼前那一屏冻住 20 秒。
                 WaitForCooldown(TransMap.HasFrontWork);
-                string src = TransMap.Take(500);
-                if (src == null) { RefreshUi(true); continue; } // 队列空闲：把还没刷出去的译文一次性刷到界面。
+                // v1.2.5 修复：Take 现在返回【请求单元】—— 扫描器收齐的一个板块一次取走（≥2 条），
+                // 单条路径拿到的仍是长度 1 的数组。为什么让两种投递共用一个出口、而不是另开一条取货函数：
+                // 单条那一路要的东西一个不少（src / 范围 / 代际 / 世界档），只是条数变了；
+                // 共用出口才不会出现"单元那条路忘了还账"的半套实现（在飞计数是逐条借还的）。
+                TransMap.FlushStaged(TransMap.StageTtlMs);   // 扫描器没来认领的暂存文字（选项面板没开/那一页没扫到）到期回落成单条
+                string[] unit = TransMap.Take(500);
+                if (unit == null) { RefreshUi(true); continue; } // 队列空闲：把还没刷出去的译文一次性刷到界面。
+                string src = unit[0];                             // 单元的身份就是第一条：范围/代际/世界档都按它算
 
                 // v1.2.0 需求5：这条文字的【翻译范围】跟着它一路走到请求里。入队时记下的快照
                 // （TransMap.ScopeOf），Loop 在这里交给引擎 —— AI 引擎用它选提示词语境，
@@ -199,7 +205,7 @@ namespace Cs2AutoTranslator
                 bool world = TransMap.IsWorldSource(src);
 
                 TranslatorSetting setting = TranslatorSetting.Instance;
-                if (setting == null) { RequeueOrDrop(src, gen); Thread.Sleep(500); continue; }
+                if (setting == null) { RequeueUnit(unit, gen); Thread.Sleep(500); continue; }
 
                 string target = setting.TargetLocale;
                 ITranslationEngine engine = TranslationEngines.Get(setting.TranslationEngine);
@@ -215,15 +221,24 @@ namespace Cs2AutoTranslator
                                     "已暂停翻译并在界面保留原文；去选项里填好后点「保存设置并翻译」。");
                     }
                     Patches.MarkerEnabled = false;
-                    RequeueOrDrop(src, gen);
+                    RequeueUnit(unit, gen);
                     Thread.Sleep(1500);
                     continue;
                 }
                 Patches.MarkerEnabled = true; // 引擎可用：待翻译文字显示「…」标记，翻好后原地消失。
 
+                // v1.2.5 修复：单元只对【能攒批】的引擎有意义。机翻那几家 Batchable=false，本来一次翻一条，
+                // 把整块混进它们的路径只会多一次失败机会 —— 拆回单条、退回队头（顺序不变）逐条送。
+                if (unit.Length > 1 && !engine.Batchable)
+                {
+                    for (int i = 0; i < unit.Length; i++) TransMap.ReturnToHead(unit[i]);
+                    continue;
+                }
+
                 // 反馈7：能攒批的引擎先攒批 —— 一个视野里几十条路名/区名，逐条请求就是几十次网络往返。
                 // TryBatch 返回 false 表示「这次没凑够两条」或「src 命中了缓存不必发」，交回下面的单条路径。
-                if (engine.Batchable && BatchKit.CanBatch(src) && TryBatch(setting, engine, target, src, world, gen)) continue;
+                // v1.2.5 修复：unit.Length >= 2 时整块交给 TryBatch（seed），它不再等 250ms 窗口 —— 一个板块一次请求。
+                if (engine.Batchable && (unit.Length > 1 || BatchKit.CanBatch(src)) && TryBatch(setting, engine, target, src, world, gen, unit)) continue;
 
                 try
                 {
@@ -308,6 +323,15 @@ namespace Cs2AutoTranslator
         {
             if (EngineKit.ResultStillWanted(gen, TranslationCache.ClearStamp)) { TransMap.Requeue(src); return; }
             DropStale(src);
+        }
+
+        // v1.2.5 修复：整块退还。单元取走时一次性记了 N 笔在飞，只退第一条会让其余 N-1 条永远挂着
+        // （IsIdle 从此为假 ⇒ 界面等不到"真的排空了"那次刷新）。
+        // 正序退还：Requeue 是【队尾追加】，正序追加后出队顺序与原文显示顺序一致。
+        private static void RequeueUnit(string[] unit, int gen)
+        {
+            if (unit == null) return;
+            for (int i = 0; i < unit.Length; i++) RequeueOrDrop(unit[i], gen);
         }
 
         private static int _lastStaleLog;
@@ -693,18 +717,23 @@ namespace Cs2AutoTranslator
         // 250 足以接住它们，又短到"就算队列真空着"也只多等四分之一秒（单条路径本来就要一次网络往返，
         // 这一格的量级远小于它）。凑够两条立刻收手，所以典型情形根本不睡满。
         private const int BatchWindowMs = 250;
+        // v1.2.5 修复：seed 是【扫描器收齐的一个板块】（TransMap.Take 取到的请求单元）。
+        //   · seed.Length >= 2 ⇒ 整块就是这一批，跳过下面整个攒批循环 —— 一个板块一次请求，不等 250ms 窗口
+        //     （等窗口是给"一条一条入队"的旧路径接住同伴用的，板块这条路同伴已经在手上了）；
+        //   · seed 为 null / 长度 1 ⇒ 与 v1.2.5 之前一字不差。
         private static bool TryBatch(TranslatorSetting setting, ITranslationEngine engine, string target,
-                                     string src, bool world, int stamp)
+                                     string src, bool world, int stamp, string[] seed)
         {
-            var items = new List<string> { src };
+            var items = seed == null || seed.Length == 0 ? new List<string> { src } : new List<string>(seed);
             var deferred = new List<string>();
             // v1.1.7 性能：「这条是不是已经抓在手上了」原来是 deferred.Contains 的 O(n) 线性扫
             //（deferred 上限 48 项、内层最多转 12 圈 ⇒ 每批最多 576 次字符串比较，而且比对的是整句原文）。
             // 换成 HashSet 一句话的事，顺带把去重范围摆正：旧写法只查 deferred，没查 items，
             // 所以 src 自己（或已在批里的某条）再次被 TakeSameTier 捞上来时会被【塞进同一批两遍】——
             // 编号协议按行号对齐不会翻错，但那条文本白占一格 12 分之一的批量额度。seen 一本账管两边。
+            // v1.2.5 修复：seed 整块都是"已经抓在手上"的，全部进 seen（否则重复捞到的那条会被当成新的塞第二遍）。
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            seen.Add(src);
+            for (int i = 0; i < items.Count; i++) seen.Add(items[i]);
             // v1.2.0 需求5：一批只收【同一个范围】的文本（用户原话："不同范围的肯定不可能放在同一个请求里"）。
             // 为什么必须在这里拦、不能只靠队列天然分开：前台队列里同时会有「模组设置项」「资产名」
             // 「游戏本体界面文字」三类，它们的提示词语境完全不同 —— 混在一批里，一段语境要覆盖三种文本，
@@ -723,9 +752,11 @@ namespace Cs2AutoTranslator
             // v1.2.5 需求2：再加一道【并发优先】的闸 —— 手上有 12 条、而队列里还有活时立刻停手。
             // 40 条的边界只在"整条队列只剩这一批"时才用到；有积压的时候一条线程拿满 40，
             // 另外 4 条线程与后面几十条文字只能干等这一大批生成完，玩家看到的就是"很久没动静"。
-            int totalChars = src.Length;
+            int totalChars = 0;
+            for (int i = 0; i < items.Count; i++) totalChars += items[i].Length;
             int windowEnd = Environment.TickCount + BatchWindowMs;
-            while (items.Count < BatchKit.MaxItems)
+            bool seeded = items.Count >= 2;                     // 板块整块送来的：不再等窗口、不再捞队列
+            while (!seeded && items.Count < BatchKit.MaxItems)
             {
                 // 够 12 条且后面还有人排队 ⇒ 把剩下的留给别的 worker（判据是纯函数，B 段钉着）。
                 if (BatchKit.ShouldLeaveForOthers(items.Count, TransMap.BacklogSameTier(src))) break;
@@ -790,7 +821,9 @@ namespace Cs2AutoTranslator
             // 凑不满两条就别用编号协议了（单条走原路径语义完全一致）。src 若已被缓存解决，这批就算处理完。
             // v1.2.4：这一格退的是【已经在这一批里、但不发出去】的那几条 —— 它们可能排在 src 前后，
             // 一律退回队头，让它们按原顺序被各自的攒批接走（退队尾就乱了视觉顺序，见 ReturnToHeadOrDrop）。
-            if (todo.Count < 2 || todo[0] != src)
+            // v1.2.5 修复：整块送来的那一批不要求 todo[0] 就是 src —— src 若被磁盘缓存就地解决，
+            // 它就不在 todo 里，但剩下那几条仍是同一个板块、顺序也还是显示顺序，照样一次请求送出去。
+            if (todo.Count < 2 || (!seeded && todo[0] != src))
             {
                 int start = (todo.Count > 0 && todo[0] == src) ? 1 : 0;
                 for (int i = start; i < todo.Count; i++) ReturnToHeadOrDrop(todo[i], stamp);
@@ -2357,7 +2390,13 @@ namespace Cs2AutoTranslator
                 if (Scope.ShouldSkipLocal(baseVal, TargetLocale, ActiveLocale)) { TransMap.ResolveAsSkip(baseVal); return true; }
 
                 TransMap.NoteScope(baseVal, cat);              // v1.2.0 需求5：范围跟着文字入队，Loop 取出来决定提示词语境
-                TransMap.Enqueue(baseVal);            // 首次见到：入队后台翻译（入队的是干净原文，绝不含标记）。
+                // v1.2.5 修复：选项界面的文字先【暂存】不直接入队 —— 让扫描器把同一个板块的文字收齐、
+                // 合成一个请求（玩家要的"板块标题＋5 个设置项一次送"）。
+                // 为什么不在这里猜板块：此刻手上只有 key，没有"这一项属于哪个板块"的可靠来源；
+                // 扫描器那边正在走同一棵树、手里就有 section/options 与板块标题，让它来收才对得上。
+                // 暂存不会丢：扫描器没来认领（选项面板没开、那一页没扫到）时，Loop 会按 StageTtlMs 到期回落成单条。
+                if (key != null && key.StartsWith("Options.", StringComparison.Ordinal)) TransMap.Stage(baseVal, key);
+                else TransMap.Enqueue(baseVal);      // 首次见到：入队后台翻译（入队的是干净原文，绝不含标记）。
                 if (!_firstEnqueueLogged) { _firstEnqueueLogged = true; ModLog.Info($"[Hook] 前缀已生效，首次入队待翻译文本：'{Probe.Trunc(baseVal, 40)}'（key={Probe.Trunc(key, 40)}）。"); }
                 // 静态待翻译标记：原文末尾加一个「…」表示「正在翻译」，翻好后连同标记一起原地变成译文。
                 // v1.1.7 性能：串走 TransMap.WithPendingMarker 的小表，同一条未翻文字不再每次取词都重拼一遍。
@@ -2862,6 +2901,16 @@ namespace Cs2AutoTranslator
                     object page = pe.Value;
                     if (page == null) continue;
                     string pageKey = pe.Key == null ? null : pe.Key.ToString();
+                    // v1.2.5 修复：这一页的 id 要从 `Options.SECTION[<页id>]` 的方括号里取 —— 板块标题
+                    // （Options.GROUP[…]）认领时要用它比对"这个标题是不是这一页的"。取不到就 null ⇒ 一条标题都不认领
+                    //（自校验：宁可这一块没有标题，也绝不猜一条不存在的 key）。
+                    string pageIdForUnit = null;
+                    if (!string.IsNullOrEmpty(pageKey))
+                    {
+                        int lb = pageKey.IndexOf('[');
+                        int rb = pageKey.LastIndexOf(']');
+                        if (lb >= 0 && rb > lb + 1) pageIdForUnit = pageKey.Substring(lb + 1, rb - lb - 1);
+                    }
                     if (!DropdownKit.ShouldVisitPage(fullSweep, pageKey, gate.Page, gate.Searching, gate.Known))
                     {
                         t.SkippedPages++;          // 整页没打开 ⇒ 一处都不看、一条都不排，也根本不进这一页的树
@@ -2909,6 +2958,18 @@ namespace Cs2AutoTranslator
                         // "这个板块碰过"错认成别的板块碰过 ⇒ 那等于凭空放行一片没被看过的说明
                         //（§10 第 9 条的反面）。secId 是游戏自己写在 section 对象上的，切标签页也不变。
                         string where = pageTag + " 区" + (string.IsNullOrEmpty(secId) ? secNo.ToString() : secId);
+                        // ===== v1.2.5 修复：一个板块收一次请求 =====
+                        // 扫描器此刻正走在这一块自己的树上，手里就有它的全部文字（板块标题 + 选项行标题 +
+                        // 每个下拉框的候选项），所以由它来收：BeginSection 之后的 Enqueue 只进收集器，
+                        // 走完这一块再一次性投递成"一次请求"。
+                        // 为什么不能靠攒批窗口（250ms）去接：扫描一轮 1.2 秒、界面是一行一行入队的，
+                        // 实机凭据就是 2 条 / 2 条 / 5 条地发，每条 11~42 秒 —— 玩家说的"几乎每个设置项一个请求"。
+                        // 预算沿用扫描那一格（DropdownKit.ScanEnqueueBudget - 本轮已入队），与逐条那道闸同一个口径。
+                        bool unitOpen = !s_Sweep && options.Count > 0
+                                        && TransMap.BeginSection(DropdownKit.ScanEnqueueBudget - t.NewQueues);
+                        if (unitOpen) TransMap.ClaimHeadings(pageIdForUnit);   // 板块标题排在这一块最前面
+                        try
+                        {
                         foreach (object option in options)
                         {
                             // 读的是 Option.widget 这个自动属性（不是 SettingItemData.widget 那种懒建属性）。
@@ -2921,6 +2982,17 @@ namespace Cs2AutoTranslator
                             //   其它标签页要等玩家点过去、清单换了才进入扫描。
                             object widget = option == null ? null : Patches.ReadObj(option, "widget");
                             if (widget != null) WalkWidget(widget, dict, dictReady, guardSelf, enabled, target, active, t, where, pageTag, pageIsMod);
+                        }
+                        }
+                        finally
+                        {
+                            // 一定要在 finally 里收尾：中途抛异常时，已经收进手上的那几条也得投递出去
+                            //（投不出去就等于这一轮白扫，下一轮还要再等 1.2 秒）。
+                            if (unitOpen)
+                            {
+                                int got = TransMap.EndSection();
+                                if (got >= 2) ModLog.Info("[板块] " + where + " 收齐 " + got + " 条，一次请求送出（v1.2.5）。");
+                            }
                         }
                     }
                 }
@@ -3243,8 +3315,9 @@ namespace Cs2AutoTranslator
                     // 源文本已经解析好并存在 RowSlot 里，所以下一轮直接走到这一格排队，不重查字典。
                     if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return; }
                     TransMap.NoteScope(s.Source, Scope.ClassifyItem(s.Original.id, pageIsMod));   // v1.2.0 需求5：与上面 inScope 同一判决据，只是拿来给提示词分语境
-                    TransMap.Enqueue(s.Source);
-                    t.RowEnqueued++;
+                    // v1.2.5 修复：按返回值记账 —— 收板块期间"进了收集器"才算入队；已经在队里/已经翻好/额度用完
+                    // 的那几条不能也 +1（否则日志说排了 24 条、其实一次请求只发了 5 条，越看越糊涂）。
+                    if (TransMap.Enqueue(s.Source)) t.RowEnqueued++;
                     return;
 
                 case DropdownKit.Keep:
@@ -3450,9 +3523,12 @@ namespace Cs2AutoTranslator
                     if (!DropdownKit.BudgetLeft(t.NewQueues)) { t.Deferred++; return changed; }
                     t.Pending++;
                     TransMap.NoteScope(o.Source, Scope.ClassifyItem(o.Original.id, pageIsMod));   // v1.2.0 需求5：与上面 inScope 同一判决据，只是拿来给提示词分语境
-                    TransMap.Enqueue(o.Source);
-                    t.Enqueued++;
-                    if (row != null) row.Enqueued++;
+                    // v1.2.5 修复：按返回值记账（同选项行那一格）。
+                    if (TransMap.Enqueue(o.Source))
+                    {
+                        t.Enqueued++;
+                        if (row != null) row.Enqueued++;
+                    }
                     return changed;
 
                 case DropdownKit.Keep:
@@ -3578,6 +3654,37 @@ namespace Cs2AutoTranslator
         private static readonly BlockingCollection<string> Pending = new BlockingCollection<string>(new ConcurrentQueue<string>());
         private static readonly BlockingCollection<string> PendingWorld = new BlockingCollection<string>(new ConcurrentQueue<string>());
 
+        // ===== v1.2.5 修复：板块级请求单元（玩家原话见 BatchKit.ChunkUnit 顶上那段）=====
+        // 为什么另开一张表，而不是"把几条塞进 Pending 就当一批"：Pending 里躺的是【单条】文字，
+        // 取货方（TakeFrom）一次只摘一条，5 条线程各摘一条就各发一次请求 —— 这正是玩家看到的
+        // "几乎每个设置项一个请求"。请求的【单位】必须比"一条"大，所以这里存的是【整块】：
+        // 扫描器把一个板块收齐后投进 Units，Take 先看这张表，一次取走整块。
+        // ⚠ 单元里的每一条仍然各自进 Queued（去重/在飞/译文表那几本账一条都不少），
+        //   只是"一起出发"—— 所以翻好了、失败了、被清代了，走的还是原来那几条路径。
+        private static readonly BlockingCollection<string[]> Units =
+            new BlockingCollection<string[]>(new ConcurrentQueue<string[]>());
+
+        // v1.2.5 修复：暂存。选项界面的文字（key 形如 Options.*）先不直接入队，等扫描器来认领：
+        // 扫描器那一刻正走在同一棵树上，手里有板块标题、选项行、候选项，能凑成真正的"一个板块一次请求"。
+        // 认领不到（玩家没打开选项面板、那一页没被扫到）⇒ 按 StageTtlMs 到期回落成单条，绝不丢。
+        private struct StageEntry
+        {
+            public Scope.Category Scope;
+            public string Key;
+            public int At;
+        }
+        public const int StageTtlMs = 2500;    // 2 秒多一点：比一次扫描间隔(1.2s)长，又短到玩家察觉不到那点延迟
+        private static readonly ConcurrentDictionary<string, StageEntry> Staged =
+            new ConcurrentDictionary<string, StageEntry>(StringComparer.Ordinal);
+
+        // 扫描器收一个板块期间用的收集器（只在扫描线程上活着，所以是 ThreadStatic）。
+        // _collectBudget 是这一轮还剩几个入队名额（沿用扫描预算 ScanEnqueueBudget，别让一页把额度吃光）。
+        [ThreadStatic] private static bool _collecting;
+        [ThreadStatic] private static List<string> _collected;
+        [ThreadStatic] private static Dictionary<string, Scope.Category> _collectedScopes;
+        [ThreadStatic] private static HashSet<string> _collectedSeen;
+        [ThreadStatic] private static int _collectBudget;
+
         // v1.2.4 需求3：攒批时「这一条不属于这一批」的退回，退到【队头】而不是队尾。
         // 为什么另开一张表而不是往 Pending 里塞：BlockingCollection 只有 Add（排到尾部），
         // 没有插队 API，硬插要自己实现 IProducerConsumerCollection —— 那是比本轮大得多的动作。
@@ -3672,15 +3779,20 @@ namespace Cs2AutoTranslator
         // 队列空且没有在飞的请求 = 真的闲下来了（反馈6 的首批刷新判据）。两条队列都算。
         // v1.2.4：两张「退回队头」的小表也算活 —— 那里躺着的是已经取走又退回的文字，
         // 漏算的话会出现"队列说空了、其实还有一条等着被翻"，界面就少刷一次。
+        // v1.2.5 修复：还没被认领的暂存文字也算活（它们在等扫描器凑板块，凑不到就到期回落）。
+        // 漏算的话会出现"队列说空了、其实还有几条等着发"，界面少刷一次、玩家以为没在翻。
         public static bool IsIdle => Pending.Count == 0 && PendingWorld.Count == 0
                                      && HeadFront.IsEmpty && HeadWorld.IsEmpty
+                                     && Units.Count == 0 && Staged.IsEmpty
                                      && Volatile.Read(ref _inFlight) == 0;
 
         // v1.1.4：前台（界面文字）这一队有没有活。冷却分档靠它判 —— 世界文字那场洪水造成的限流
         // 不该把玩家眼前那一屏一起冻住（用户 2026-10-02 的原话：只有在打开新界面时才判断送翻，
         // 大量文本是背景活，不能让背景活停住前景活）。
         // v1.2.4：队头那张表一并算进来（同 IsIdle 的理由）。
-        public static bool HasFrontWork => Pending.Count > 0 || !HeadFront.IsEmpty;
+        // v1.2.5 修复：手上的单元 / 暂存里等认领的板块文字同样是"眼前这一屏"的活 ——
+        // 冷却分档靠这一格判，漏算就会让世界文字那场洪水在玩家正看着选项页时先跑。
+        public static bool HasFrontWork => Pending.Count > 0 || !HeadFront.IsEmpty || Units.Count > 0;
 
         // v1.2.5 需求2：这条文字所在的那一队还有多少条在等（正式队列 + 被退回队头的那张表）。
         // 攒批的「够 12 条就让给别人」判据用它（BatchKit.ShouldLeaveForOthers）：
@@ -3701,16 +3813,165 @@ namespace Cs2AutoTranslator
         private static BlockingCollection<string> QueueFor(string src)
             => WorldSources.ContainsKey(src) ? PendingWorld : Pending;
 
-        public static void Enqueue(string src)
+        // v1.2.5 修复：返回值改成"这一条有没有真的进队"。为什么现在需要它：
+        // 扫描器收板块时，"进了板块"与"早就在队里 / 已经翻好 / 额度用光"是两回事，
+        // 日志与 Tally 里的入队条数要按真值记账，不能再一律 +1。
+        public static bool Enqueue(string src)
         {
+            Scope.Category scope = _pendingScope;              // 入队方在调 Enqueue【之前】钉的类目；没钉就是 GameCore
+            _pendingScope = Scope.Category.GameCore;
+            return EnqueueWithScope(src, scope);
+        }
+
+        // v1.2.5 修复：暂存一条选项界面文字，等扫描器来认领（见 StageEntry 那段）。
+        // 早退条件与 Enqueue 逐字相同 —— 暂存不是"绕过判据的捷径"，只是"晚一步投递"。
+        public static void Stage(string src, string key)
+        {
+            Scope.Category scope = _pendingScope;
+            _pendingScope = Scope.Category.GameCore;
             if (string.IsNullOrEmpty(src)) return;
             if (Translated.ContainsKey(src) || Resolved.ContainsKey(src) || GivenUp.ContainsKey(src)) return;
-            if (Queued.TryAdd(src, 0))
+            if (Queued.ContainsKey(src)) return;               // 已经在队里/单元里：别在暂存里再躺一份
+            Staged.TryAdd(src, new StageEntry { Scope = scope, Key = key, At = Environment.TickCount });
+        }
+
+        // 暂存到期回落：扫描器没来认领的那些按普通单条入队（就是 v1.2.5 之前的路径，只是晚 ≤2.5 秒）。
+        public static void FlushStaged(int maxAgeMs)
+        {
+            if (Staged.IsEmpty) return;
+            int now = Environment.TickCount;
+            foreach (KeyValuePair<string, StageEntry> kv in Staged)
             {
-                Scopes[src] = _pendingScope;   // 入队方在调 Enqueue【之前】钉的类目；没钉就是 GameCore
-                _pendingScope = Scope.Category.GameCore;
-                try { QueueFor(src).Add(src); } catch { /* 已 CompleteAdding */ }
+                if (unchecked(now - kv.Value.At) < maxAgeMs) continue;
+                StageEntry entry;
+                if (!Staged.TryRemove(kv.Key, out entry)) continue;   // 已被扫描器认领
+                EnqueueWithScope(kv.Key, entry.Scope);
             }
+        }
+
+        // ===== 扫描器侧：一个板块收一次 =====
+        // BeginSection/EndSection 之间，本线程上的 Enqueue 只进收集器（不入队、不占在飞），
+        // 这样"同一个板块的文字"才能凑成一块再投递；预算用完就只收不投（超出部分回落成单条）。
+        public static bool BeginSection(int budget)
+        {
+            if (_collecting) return false;                     // 嵌套（不该发生）：外层说了算
+            _collecting = true;
+            if (_collected == null) _collected = new List<string>();
+            if (_collectedScopes == null) _collectedScopes = new Dictionary<string, Scope.Category>(StringComparer.Ordinal);
+            if (_collectedSeen == null) _collectedSeen = new HashSet<string>(StringComparer.Ordinal);
+            _collected.Clear();
+            _collectedScopes.Clear();
+            _collectedSeen.Clear();
+            _collectBudget = budget < 0 ? 0 : budget;
+            return true;
+        }
+
+        // 把暂存里属于【这一页】的板块标题收进当前收集器（按入队时刻升序 ⇒ 与界面上从上到下一致）。
+        // ⚠ 故意不拼 `Options.GROUP[<页>.<组>]` 这种精确 key：组序号有两列（Option.simpleGroupIndex /
+        //   advancedGroupIndex），用哪一列要看 OptionsUISystem 的私有字段 m_IsAdvanced —— 拼错就是凭空
+        //   查一条不存在的 key。这里只认"key 里含这一页 id"，取不到就一条不加（自校验，绝不猜）。
+        public static int ClaimHeadings(string pageId)
+        {
+            if (!_collecting || string.IsNullOrEmpty(pageId) || Staged.IsEmpty) return 0;
+            var picked = new List<KeyValuePair<int, string>>();
+            foreach (KeyValuePair<string, StageEntry> kv in Staged)
+            {
+                string key = kv.Value.Key;
+                if (key == null || !key.StartsWith("Options.GROUP[", StringComparison.Ordinal)) continue;
+                if (key.IndexOf(pageId, StringComparison.Ordinal) < 0) continue;
+                picked.Add(new KeyValuePair<int, string>(kv.Value.At, kv.Key));
+            }
+            if (picked.Count == 0) return 0;
+            picked.Sort((a, b) => a.Key.CompareTo(b.Key));
+            int n = 0;
+            for (int i = 0; i < picked.Count; i++)
+            {
+                string text = picked[i].Value;
+                StageEntry entry;
+                if (!Staged.TryRemove(text, out entry)) continue;
+                if (EnqueueWithScope(text, entry.Scope)) n++;
+            }
+            return n;
+        }
+
+        // 收尾：把收集到的文字按显示顺序切块（BatchKit.ChunkUnit，纯函数，B 段钉着）。
+        // ≥2 条 ⇒ 一块，投进 Units（一次请求）；1 条 ⇒ 走原来的取货路径（不记在飞，等 TakeFrom 再记）。
+        // 返回值是"真正进了队列的条数"，供扫描日志记账。
+        public static int EndSection()
+        {
+            if (!_collecting) return 0;
+            _collecting = false;
+            List<string> list = _collected;
+            Dictionary<string, Scope.Category> scopes = _collectedScopes;   // 投递时还要用：范围快照得跟着文字进 Scopes
+            _collected = null;
+            _collectedScopes = null;
+            _collectedSeen = null;
+            _collectBudget = 0;
+            if (list == null || list.Count == 0) return 0;
+
+            var units = new List<string[]>();
+            var singles = new List<string>();
+            BatchKit.ChunkUnit(list, units, singles);
+            int kept = 0;
+            for (int u = 0; u < units.Count; u++)
+            {
+                string[] chunk = units[u];
+                var live = new List<string>();
+                for (int i = 0; i < chunk.Length; i++)
+                {
+                    if (Admit(chunk[i], scopes)) live.Add(chunk[i]);
+                }
+                kept += live.Count;
+                if (live.Count >= 2) { try { Units.Add(live.ToArray()); } catch { /* 已 CompleteAdding */ } }
+                else if (live.Count == 1) AdmitSingle(live[0]);
+            }
+            for (int i = 0; i < singles.Count; i++)
+            {
+                if (Admit(singles[i], scopes)) { AdmitSingle(singles[i]); kept++; }
+            }
+            return kept;
+        }
+
+        // 收集器里这一条还能不能真的进队：早就在队里（上一轮排着的/别处入的）就跳过 —— 绝不重复投递。
+        // 顺带把范围快照写进 Scopes（Take 之后 Loop 要用它选提示词语境）。
+        private static bool Admit(string src, Dictionary<string, Scope.Category> scopes)
+        {
+            if (string.IsNullOrEmpty(src)) return false;
+            if (Translated.ContainsKey(src) || Resolved.ContainsKey(src) || GivenUp.ContainsKey(src)) return false;
+            if (!Queued.TryAdd(src, 0)) return false;
+            Scope.Category c;
+            if (scopes != null && scopes.TryGetValue(src, out c)) Scopes[src] = c;
+            Staged.TryRemove(src, out _);
+            return true;
+        }
+
+        // 单条投递：走 v1.2.5 之前的取货路径。
+        // 投进【队头那张表】而不是队列尾：扫描是自上而下走的，这几条就是玩家眼前这一屏，
+        // 排在整屏之后等于让眼前那几行等完整屏（v1.2.4 需求3 的同一条理由）。
+        // ⚠ 不记在飞：它还没被 TakeFrom 取走，等真取走那一步再 +1（一笔借还，绝不双计）。
+        private static void AdmitSingle(string src)
+        {
+            PushbackFor(QueueFor(src)).Enqueue(src);
+        }
+
+        private static bool EnqueueWithScope(string src, Scope.Category scope)
+        {
+            if (string.IsNullOrEmpty(src)) return false;
+            if (Translated.ContainsKey(src) || Resolved.ContainsKey(src) || GivenUp.ContainsKey(src)) return false;
+            if (_collecting)
+            {
+                // 收板块期间：只进收集器，不入队、不占在飞 —— 等 EndSection 一次投递。
+                if (_collected == null || _collectBudget <= 0) return false;
+                if (!_collectedSeen.Add(src)) return false;      // 同一板块里同一句话出现两次：只收一次
+                _collected.Add(src);
+                _collectedScopes[src] = scope;
+                _collectBudget--;
+                return true;
+            }
+            if (!Queued.TryAdd(src, 0)) return false;
+            Scopes[src] = scope;
+            try { QueueFor(src).Add(src); } catch { /* 已 CompleteAdding */ }
+            return true;
         }
 
         // 入队前由调用方钉下「这条属于哪个翻译范围」（v1.2.0 需求5）。字段而不是参数：
@@ -3732,10 +3993,23 @@ namespace Cs2AutoTranslator
             return (!string.IsNullOrEmpty(src) && Scopes.TryGetValue(src, out c)) ? c : Scope.Category.GameCore;
         }
 
-        public static string Take(int msTimeout)
+        // v1.2.5 修复：返回【请求单元】而不是一条。为什么改签名而不是另开一条取货函数：
+        // 单条那一路要的东西一个不少（src / 范围 / 代际 / 世界档），只是条数变了；
+        // 两种投递共用一个出口，才不会出现"单元那条路忘了还账"的半套实现。
+        // 取货顺序：手上的单元 → 前台队列 → 世界队列（单元是"玩家眼前这一屏的一个板块"，必须先走）。
+        // 在飞计数：单元一次记 N 笔（逐条借还，IsIdle 的不变式不变）。
+        public static string[] Take(int msTimeout)
         {
+            string[] unit;
+            while (Units.TryTake(out unit))
+            {
+                if (unit == null || unit.Length == 0) continue;    // 防御：不该出现
+                Interlocked.Add(ref _inFlight, unit.Length);
+                return unit;
+            }
             string s = TakeFrom(Pending, msTimeout);
-            return s ?? TakeFrom(PendingWorld, 0);
+            if (s == null) s = TakeFrom(PendingWorld, 0);
+            return s == null ? null : new[] { s };
         }
 
         // 攒一批时继续捞用：只从【同一条队列】拿。混着攒的话，一条面板文字会顺手拽进 11 条路名，
@@ -3923,6 +4197,15 @@ namespace Cs2AutoTranslator
             // 等于凭空多出一条"没人认领"的活。两行清空是这条不变式的必要条件。
             while (HeadFront.TryDequeue(out _)) { }
             while (HeadWorld.TryDequeue(out _)) { }
+            // v1.2.5 修复：手上的单元与暂存里的选项文字同理 —— 它们不在那两条队列里，
+            // 漏了这一格，清完缓存它们会带着旧代际冒出来（而且 _inFlight 已归零 ⇒ 凭空多出一笔没人认领的活）。
+            while (Units.TryTake(out _)) { }
+            Staged.Clear();
+            _collecting = false;
+            _collected = null;
+            _collectedScopes = null;
+            _collectedSeen = null;
+            _collectBudget = 0;
         }
     }
 

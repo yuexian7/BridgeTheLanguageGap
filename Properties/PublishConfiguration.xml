@@ -239,27 +239,33 @@ BLG 的翻译范围包括游戏本体文本、模组选项页面及游戏内面�
 	     ⚠ 推上去后平台会把「- 」改写成「*   」（三星号三空格），所以 preflight 把这个字段固定判「?」不可比对，
 	     发布后要人工在网页端看一眼版本说明（§1.2 第 4 条经验）。 -->
 	<ChangeLog>
-v1.1.5
+v1.2.5
 
-- Added translation for dropdown option text.
-- Reduced translation usage.
-- Fixed some wording. Proper nouns, such as mod names and platform names, are no longer machine-translated.
-- When the target language is outside the game's 12 official languages, this mod's own settings page is now translated as well.
-- Improved how text is picked up for translation, so fewer lines are left untranslated.
-- For players using a network proxy, the mod now automatically retries over the other route (proxy or direct connection), so a broken proxy setting no longer stops translation.
-- Faster: concurrent network requests increased from 3 to 5, and the UI refresh interval reduced to 0.9 seconds.
-- Uninstalling the mod no longer affects the game in any way.
+- Added a Get API Key button for custom AI providers.
+- Adjusted the reasoning strength settings; custom endpoints can now choose Off / Send / Do Not Send.
+- Optimized AI translation prompts for more accurate results.
+- Optimized token usage for connection tests.
+- Reduced the size of mod logs.
+- Reduced stuttering in certain situations.
+- Reduced fragmented requests and interleaved content updates.
+- Improved cache, language detection, and network connection stability.
+- Improved handling of missing or incomplete translations for settings, descriptions, and dropdown options.
+- Improved handling of numbers, units, paths, and shortcuts that were incorrectly translated.
+- Fixed errors that could appear when a translation engine encountered a problem.
 
 中文
 
-- 新增对下拉框候选项的文本翻译。
-- 减少了一些翻译的消耗。
-- 修正了部分文字，对于专有名词，比如模组名和平台名不再被硬翻。
-- 目标语言选到游戏官方12 种语言之外时，本模组选项页面现在也会被翻译。
-- 优化了翻译机制，尽量减少部分文本未被翻译的现象。
-- 对于使用网络代理的玩家，模组会自动在走代理和直连之间换一条路重试，以减少因代理出问题而无法翻译。
-- 速度提升：同时进行的网络请求从 3 路增加到 5 路，界面刷新间隔缩短到 0.9 秒。
-- 现在模组卸载不会对游戏有任何影响。
+- 自定义AI厂商新增“获取密钥”按钮
+- 调整了思考强度的设置，自定义端点可选择“关闭 / 发送 / 不发送”
+- 优化了AI翻译的提示词，现在翻译结果会更准确
+- 优化了测试通道的token消耗
+- 优化了模组日志的大小
+- 减少部分情况下的卡顿
+- 减少零散请求和内容交错显示
+- 优化缓存、语言识别与网络连接稳定性
+- 优化设置项、说明和下拉框选项漏翻或翻译不完整的问题
+- 优化数字、单位、路径、快捷键等内容被误翻的问题
+- 修复翻译引擎异常时出现报错的问题
 </ChangeLog>
 	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
 	<!-- 线上三条外链，类型与 URL 都照抄；开源链接同时是兼容性审查里「代码可见」的凭据。

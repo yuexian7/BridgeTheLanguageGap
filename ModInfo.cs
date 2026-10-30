@@ -235,6 +235,21 @@ namespace Cs2AutoTranslator
         ///      openai/anthropic 协议发 thinking:{type:"disabled"}、gemini 协议发该代 thinkingBudget 下限）；
         ///      发送 = 按档位行发；不发送 = 一个字段都不发。落盘用 "Disabled" 当第三态（空串已被"不发送"占着），
         ///      读盘两侧对称，老盘的空串/档位词语义不变。
+        /// ④（2026-10-29，同版本补修，版本号不变）「没按板块攒批：第一个板块 5 个设置项字数不多，应该把板块标题
+        ///    ＋这 5 个设置项标题放在同一个请求，后面两个板块依次发送，下拉框候选项跟着该设置项的请求一起发」——
+        ///    实机日志（17:11:40~17:12:23，Custom/free-work）6 次请求分别回 2/2/5/2/2/2 条，用时 11.4/11.7/2.2/
+        ///    22.1/30.1/42.5 秒 ⇒ 请求条数≈文字条数的一半，5 条那一次只用 2.2 秒：慢在请求次数，不是再调窗口。
+        ///    ⇒ 请求单位从「一条」升级成「一个板块（一个 section）」：扫描器走一棵 section 时开收集器
+        ///      （TransMap.BeginSection），板块标题（Options.GROUP[…] 那几条被 Prefix 暂存起来的）先认领进来，
+        ///      随后该 section 的选项行标题与下拉候选项按显示顺序收进同一条 string[]，BatchKit.ChunkUnit 按
+        ///      CanBatch / MaxItems=40 / MaxTotalChars=1800 切块 ⇒ 一板块一请求，块内顺序＝界面顺序。
+        ///    ⇒ TransMap 新增 Units（BlockingCollection<string[]>）+ Staged（Prefix 遇到 Options.* 先暂存 2.5 秒
+        ///      等扫描器认领，没人认领就 FlushStaged 按单条入队，旧行为只是晚 ≤2.5 秒）；原有 Pending/PendingWorld/
+        ///      HeadFront/HeadWorld 全部不动，Take 改成返回 string[]（单条包成 1 元素数组），取走一个单元按
+        ///      unit.Length 记在飞、每条最终各还一次 ⇒ IsIdle 判据不被单元打破。
+        ///    ⇒ 不按 group 细分（组序号有 simple/advanced 两列，选哪列要看私有字段 m_IsAdvanced ⇒ 宁可一页一块，
+        ///      也不去拼一个可能不存在的 key）；非批量引擎（机翻/Cloudflare）拿到多元素单元会按正序拆回队头。
+        ///    ⇒ 日志新形状：`[板块] 页:… 区… 收齐 N 条，一次请求送出（v1.2.5）。`
         /// </summary>
 
         /// <summary>

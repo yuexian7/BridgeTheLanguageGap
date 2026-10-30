@@ -547,6 +547,52 @@ namespace Cs2AutoTranslator
             return !StartsWithNumber(s.TrimStart());           // "3. Elm Street" 会和行号标记撞车
         }
 
+        // ===== v1.2.5 修复：板块级请求单元 =====
+        // 玩家原话：「第一个板块有 5 个设置项，字数不多，应该把板块标题＋这 5 个设置项标题放在同一个请求里，
+        // 后面两个板块依次发送」，而实机日志是几乎每个设置项一个请求（2 条 / 2 条 / 5 条地发，每条 11~42 秒）。
+        // 攒不起来的原因不在 SliceMs 那个窗口太短 —— 扫描器【本来就把整页的文字一次收在手上了】，
+        // 问题只在投递方式（入队一条、5 条线程各抓一条就发）。所以这里不碰任何队列，只做一件事：
+        // 把【同一个板块】收来的一串文字按显示顺序切成若干块，每块就是一次请求。
+        // 三条判据都是纯函数（CanBatch / Fits / MaxItems），tests\t3 的 B 段能逐条钉住。
+        // 三条例外：
+        //   · 进不了批的（自带换行 / 超长 / 数字开头）→ singles，走原来的单条路径，绝不塞进单元；
+        //   · 切出来的块只有 1 条 → 也进 singles（一条没有"编号对齐"可言，单条语义更稳，也和旧行为一致）；
+        //   · 块与块之间按显示顺序切，绝不重排 —— 玩家要的是"从上往下依次出来"。
+        internal static void ChunkUnit(IList<string> texts, List<string[]> units, List<string> singles)
+        {
+            if (texts == null || units == null || singles == null) return;
+            var cur = new List<string>();
+            int used = 0;
+            for (int i = 0; i < texts.Count; i++)
+            {
+                string s = texts[i];
+                if (!CanBatch(s))
+                {
+                    FlushUnit(cur, units, singles);
+                    used = 0;
+                    if (!string.IsNullOrEmpty(s)) singles.Add(s);
+                    continue;
+                }
+                if (cur.Count > 0 && (cur.Count >= MaxItems || !Fits(used, s)))
+                {
+                    FlushUnit(cur, units, singles);
+                    used = 0;
+                }
+                cur.Add(s);
+                used += s.Length + 4;                          // 与 Fits 的口径一致：每条 4 字留给 "12. " + 换行
+            }
+            FlushUnit(cur, units, singles);
+        }
+
+        // ChunkUnit 的收尾动作：≥2 条 ⇒ 一块（一次请求）；1 条 ⇒ 退回单条路径；0 条 ⇒ 什么都不做。
+        private static void FlushUnit(List<string> cur, List<string[]> units, List<string> singles)
+        {
+            if (cur.Count == 0) return;
+            if (cur.Count == 1) singles.Add(cur[0]);
+            else units.Add(cur.ToArray());
+            cur.Clear();
+        }
+
         // 请求里的编号块："1. 文本" 每条一行。
         public static string Join(string[] texts)
         {

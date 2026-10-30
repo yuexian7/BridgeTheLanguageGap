@@ -121,7 +121,7 @@ with `User version already exists for this mod`.
 
 ## Version
 
-Current source: **v1.1.5** · Published on Paradox Mods: **v1.1.5**, 2026-10-03 (platform `modVersion` 5, package 917,381 B; previously v1.0.4 on 2026-09-25) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
+Current source: **v1.2.5** · Published on Paradox Mods: **v1.2.5**, 2026-10-30 (platform `modVersion` 6, package 936,590 B; previously v1.1.5 on 2026-10-03) · Targets game **1.6.\*** · Platform: Windows (macOS/Linux assemblies are stubs — no Burst code in this mod).
 
 ## License
 
